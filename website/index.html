@@ -277,9 +277,10 @@ tbody tr:last-child td{border-bottom:0}
 /* Profil pengendali per orang */
 .pp-block{display:grid;gap:10px}.pp-block h3{margin:4px 0 0}
 .pp-sum{margin:0;font-size:14px;font-weight:600;line-height:1.5}
-.pp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px}
-.pp-card{background:var(--sheet);border:1px solid var(--rule);border-radius:12px;padding:12px 14px;display:grid;gap:7px;align-content:start}
-.pp-card header{display:flex;gap:10px;align-items:center}
+.pp-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:10px}
+.pp-card{background:var(--sheet);border:1px solid var(--rule);border-radius:12px;padding:12px 14px;display:grid;grid-template-columns:minmax(0,1fr);gap:7px;align-content:start}
+.pp-card header{display:flex;gap:10px;align-items:center}.pp-card header>div{min-width:0}
+.pp-block{grid-template-columns:minmax(0,1fr)}
 .pp-av{width:38px;height:38px;border-radius:50%;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font:700 14px var(--f-data);flex:none}
 .pp-card p{margin:0;font-size:12.5px;line-height:1.5}
 .pp-k{display:block;font:600 10px var(--f-data);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);margin-bottom:1px}
@@ -288,6 +289,37 @@ tbody tr:last-child td{border-bottom:0}
 .pp-chip em{font-style:normal;font-size:9.5px;margin-left:5px;padding:0 4px;border-radius:3px}
 .pp-chip.ok em{background:var(--good-bg);color:var(--good)}.pp-chip.maybe em{background:var(--warn-bg);color:var(--warn)}
 .pp-risk{background:var(--strong-bg);border-radius:8px;padding:6px 8px}
+/* Pendalaman profil: rekam jejak, perkara, pengurus rinci, rantai kepemilikan, temuan tersembunyi */
+.pp-chip.ind em{background:var(--calm-bg);color:var(--calm)}.pp-chip.co{background:var(--sheet)}.pp-chip.co em{background:var(--accent-soft);color:var(--ink-2)}
+em.yk{font-style:normal;font-size:9.5px;margin-left:4px;padding:0 5px;border-radius:3px;white-space:nowrap}
+em.yk.ok{background:var(--good-bg);color:var(--good)}em.yk.maybe{background:var(--warn-bg);color:var(--warn)}em.yk.ind{background:var(--calm-bg);color:var(--calm)}
+.pp-sub .pp-rj td{font-size:12px;vertical-align:top}.pp-sub .pp-rj td:first-child{width:38%}
+.pp-case{background:var(--strong-bg);border-radius:8px;padding:6px 8px;font-size:12.5px}.pp-case ul{margin:4px 0 0;padding-left:18px;display:grid;gap:4px}
+.pp-clean{background:var(--good-bg);border-radius:8px;padding:6px 8px;font-size:12.5px}
+.pp-mini{margin-top:4px;font-size:12px;color:var(--ink-2)}.pp-mini b{color:var(--ink)}.pp-relt{background:var(--warn-bg);border-radius:4px;padding:2px 5px}
+.pp-chain{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin-top:4px}
+.pp-node{display:grid;gap:1px;border:1px solid var(--rule);background:var(--sheet);border-radius:8px;padding:5px 8px;max-width:240px}
+.pp-node small{font-size:9.5px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.06em}.pp-node span{font-size:11.5px;color:var(--ink-2)}
+.pp-arr{color:var(--ink-2);font-weight:700}
+.pp-chainw{grid-column:1/-1}.pp-lv{display:grid;gap:4px;align-content:start}.pp-lv>small{font-size:9.5px;color:var(--ink-2);text-transform:uppercase;letter-spacing:.06em}
+.pp-hid{grid-column:1/-1;background:var(--warn-bg);border-radius:8px;padding:6px 8px}.pp-hid ul{margin:4px 0 0;padding-left:18px;display:grid;gap:4px}
+.pp-af .pp-case,.pp-af .pp-clean{grid-column:1/-1}
+a.tk{font-weight:700;color:var(--accent);text-decoration:underline dotted;cursor:pointer}
+/* Peta jaringan pengendali */
+.net-sec{margin-top:18px}.net-box{display:grid;gap:6px}
+.net-svg{display:block;width:100%;height:auto;background:var(--sheet);border:1px solid var(--rule);border-radius:10px;cursor:default}
+.net-e{stroke:var(--rule);stroke-width:1.2}.net-e.x{stroke:var(--now);stroke-width:1.6;stroke-dasharray:4 3}
+.net-n circle{stroke:var(--sheet);stroke-width:2;cursor:pointer}
+.net-n.emiten circle{fill:var(--accent)}.net-n.orang circle{fill:var(--viz-a)}.net-n.entitas circle{fill:var(--viz-c)}.net-n.pihak circle{fill:var(--viz-b)}.net-n.pengurus circle{fill:var(--calm)}
+.net-n.multi circle{stroke:var(--now);stroke-width:3}.net-n.focus circle{stroke:var(--ink);stroke-width:3}
+.net-tk{font:700 10px var(--f-data);fill:var(--accent-ink);text-anchor:middle;pointer-events:none}
+.net-lb{font:600 10px var(--f-data);fill:var(--ink-2);text-anchor:middle;paint-order:stroke;stroke:var(--sheet);stroke-width:3px;pointer-events:none}
+.net-svg.hl .net-n:not(.on){opacity:.18}.net-svg.hl .net-e:not(.on){opacity:.08}.net-svg.hl .net-e.on{stroke:var(--ink);stroke-width:2}
+.net-leg{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12px}
+.net-dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.net-dot.emiten{background:var(--accent)}.net-dot.orang{background:var(--viz-a)}.net-dot.entitas{background:var(--viz-c)}.net-dot.pihak{background:var(--viz-b)}.net-dot.pengurus{background:var(--calm)}
+.net-line{display:inline-block;width:18px;border-top:2px dashed var(--now);margin-right:5px;vertical-align:3px}
+.net-bridges{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}.net-bridges em a.tk{margin-left:3px}
 .pp-tbl td{vertical-align:top}.pp-sec td{font:700 11px var(--f-data);letter-spacing:.08em;text-transform:uppercase;color:var(--ink-2);background:var(--paper)}
 .pp-af{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;background:var(--paper);border-radius:10px;padding:10px 12px;font-size:12.5px;line-height:1.5}
 .pp-rel{background:var(--warn-bg);border-radius:6px;padding:4px 6px}
@@ -462,6 +494,7 @@ dialog.prof{width:min(920px,calc(100vw - 32px))}
 .grid-tbl th:nth-child(1){width:12%}.grid-tbl th:nth-child(2){width:16%}.grid-tbl th:nth-child(3){width:18%}
 .grid-tbl th:nth-child(4){width:11%}.grid-tbl th:nth-child(5){width:10%}.grid-tbl th:nth-child(6){width:9%}.grid-tbl th:nth-child(7){width:9%}.grid-tbl th:nth-child(8){width:15%}
 .grid-tbl td{overflow-wrap:anywhere}
+.inj-miss{font-size:12.5px;margin:-2px 0 8px;padding:6px 10px;border-left:3px solid var(--warn);background:var(--warn-bg);border-radius:2px;line-height:1.6}
 .grid-tbl .chips{flex-wrap:wrap}.grid-tbl .chip{white-space:normal;overflow-wrap:normal;max-width:100%}
 /* Kolom skor sempit: bar mengikuti lebar sel dan label keyakinan boleh dua baris. */
 .grid-tbl .score{grid-template-columns:auto minmax(0,70px)}.grid-tbl td .pill{white-space:normal;max-width:100%}
@@ -799,6 +832,7 @@ dialog::backdrop{animation:fade .18s ease-out}
       </div>
       <div class="agenda" id="potAgenda"></div>
       <section class="cycle" id="cycleBox" aria-label="Siklus saham backdoor"></section>
+      <section class="cycle net-sec" id="netBox" aria-label="Peta jaringan pengendali"></section>
       <details class="method-wrap"><summary>Metodologi penilaian & catatan analis</summary>
       <div class="method">
         <div>
@@ -1078,7 +1112,9 @@ dialog::backdrop{animation:fade .18s ease-out}
     const det = document.createElement("details"); det.className = "prog-det";
     det.innerHTML = `<summary>Rincian ${p.pct}%</summary>${p.noInject ? '<p class="nm" style="margin:4px 0">Akuisisi strategis tanpa rencana injeksi: dihitung dari tahapan pengambilalihan saja.</p>' : ""}<ul>${(p.applicable || MILESTONES).map(m => {
       const ok = !!p.ms[m.id];
-      const src = m.id === "kjpp" && k ? (k.status === "terbit" ? `terbit${k.tanggalLaporan ? " " + fmtDate(k.tanggalLaporan) : ""}${k.nama ? " · " + k.nama : ""}`
+      // KJPP dicentang karena injeksi sudah dieksekusi (inbreng wajib berdasar penilaian KJPP), walau laporannya tidak ditemukan.
+      const src = m.id === "kjpp" && k && ok && k.status !== "terbit" ? "dianggap terbit: injeksi sudah dieksekusi (inbreng wajib berdasar laporan KJPP), dokumen laporan tidak ditemukan"
+        : m.id === "kjpp" && k ? (k.status === "terbit" ? `terbit${k.tanggalLaporan ? " " + fmtDate(k.tanggalLaporan) : ""}${k.nama ? " · " + k.nama : ""}`
           : k.status === "ditunjuk" ? `KJPP${k.nama ? " " + k.nama : ""} ditunjuk, laporan belum terbit` : "belum ada penunjukan KJPP")
         : ok && p.auto[m.id] ? "terdeteksi dari laporan " + fmtDate(p.auto[m.id]) : "";
       return `<li class="${ok ? "ok" : "no"}"><span>${ok ? "✓" : "○"}</span><b>${m.w}%</b> ${esc(m.label)}${src ? `<em>${esc(src)}</em>` : ""}</li>`;
@@ -1263,6 +1299,18 @@ dialog::backdrop{animation:fade .18s ease-out}
         el.append(b);
       }
       $("pgLo").value = pgRange.lo; $("pgHi").value = pgRange.hi;
+      // Emiten yang hanya gagal SATU filter injeksi aktif, beserta alasannya — agar hasil filter bisa diperiksa.
+      const why = {
+        nonHsc: d => HSC.has(d.ticker) ? "saham HSC" : "tanpa data injeksi aset",
+        ctrlIn: d => PENGENDALI[d.ticker]?.bukanPengambilAlih ? "bukan pengambilalihan" : "akuisisi belum efektif",
+        big: d => asetRp(d) ? `aset ${big(asetRp(d))}` : "nilai aset belum diungkap",
+        prog: d => d.prog.est ? "progress masih estimasi" : `progress ${d.prog.pct}%`,
+      };
+      let miss = $("injMiss");
+      if (!miss) { miss = Object.assign(document.createElement("div"), { id: "injMiss", className: "inj-miss" }); el.closest(".fgroup").after(miss); }
+      const near = progInj.size ? prog.filter(d => pass(d, "inj")).map(d => ({ d, fail: [...progInj].filter(k => INJ[k] && !INJ[k].test(d)) })).filter(x => x.fail.length === 1) : [];
+      miss.hidden = !near.length;
+      miss.innerHTML = near.length ? `<span class="nm">Nyaris lolos (gagal 1 filter):</span> ${near.map(({ d, fail }) => `<b>${esc(d.ticker)}</b> <span class="nm">— ${esc(why[fail[0]](d))}</span>`).join(" · ")}` : "";
     }
 
     const progList = prog.filter(d => pass(d))
@@ -1768,6 +1816,8 @@ dialog::backdrop{animation:fade .18s ease-out}
           <p><b>Siapa:</b> ${esc(a.pv.siapa)}</p><p><b>Grup:</b> ${esc(a.pv.grup)}</p><p><b>Rencana:</b> ${esc(a.pv.rencana)}</p>
           <p class="an-warn"><b>Catatan investor:</b> ${esc(a.pv.catatan)}</p></section>` : ""}
         ${profilBlock(a.t)}
+        ${netEgoBlock(a.t)}
+        <section class="pp-track" id="anTrack"></section>
         ${asetBlock(a)}
         ${simBlock(a)}
         ${calcBlock(a)}
@@ -1797,6 +1847,13 @@ dialog::backdrop{animation:fade .18s ease-out}
     }));
     wireCalc(a);
     wireSim(a);
+    wireNet($("anOut"));
+    if (a.ctrlName) {
+      // Rekam jejak harga: riwayat kepemilikan ≥5% atas nama pengendali di Stockbit.
+      const nm = String(a.ctrlName).replace(/\s*\(.*\)$/, "").split(/,\s*(?=[A-Z])/)[0];
+      fetch("/api/controller?" + new URLSearchParams({ ticker: a.t, name: nm })).then(r => r.ok ? r.json() : null)
+        .then(c => { if (c && $("anTrack")) trackRecord(c, $("anTrack"), a.t, a.pv?.bukanPengambilAlih); }).catch(() => {});
+    }
     try { const h = JSON.parse(localStorage.getItem("radar-cangkang.anRecent") || "[]").filter(x => x !== a.t); localStorage.setItem("radar-cangkang.anRecent", JSON.stringify([a.t, ...h].slice(0, 8))); } catch {}
     renderAnQuick();
   }
@@ -1939,38 +1996,228 @@ dialog::backdrop{animation:fade .18s ease-out}
 
   // ---- Profil pengendali per orang, struktur pengurus, afiliasi (poin 4–6; profil-pengendali.json) ----
   let PROFIL = {};
-  fetch("profil-pengendali.json", { cache: "no-store" }).then(r => r.ok ? r.json() : {}).then(j => { PROFIL = j || {}; }).catch(() => {});
+  fetch("profil-pengendali.json", { cache: "no-store" }).then(r => r.ok ? r.json() : {}).then(j => { PROFIL = j || {}; NET = null; renderNetwork(); }).catch(() => {});
+  // Label tingkat keyakinan sebuah klaim: terverifikasi (dokumen resmi), disebut media, atau indikasi (dugaan dari pola).
+  const yakin = k => /terverifikasi/i.test(k || "") ? ["ok", "terverifikasi"] : /indikasi/i.test(k || "") ? ["ind", "indikasi"] : ["maybe", "disebut media"];
+  const tkLink = s => esc(s).replace(/\b([A-Z]{4})\b/g, (m, c) => PROFIL[c] ? `<a href="#" class="tk" data-tk="${c}">${c}</a>` : m);
   function profilBlock(t) {
     const p = PROFIL[t]; if (!p) return "";
-    const src = arr => (arr || []).length ? `<details class="more"><summary>Sumber (${arr.length})</summary><ul>${arr.slice(0, 8).map(s => `<li>${esc(s)}</li>`).join("")}</ul></details>` : "";
+    const src = arr => (arr || []).length ? `<details class="more"><summary>Sumber (${arr.length})</summary><ul>${arr.map(s => `<li>${esc(s)}</li>`).join("")}</ul></details>` : "";
+    const badge = k => { const [c, l] = yakin(k); return `<em class="yk ${c}">${l}</em>`; };
+    // Perkara: array kosong = sudah dicari dan tidak ada; field tidak ada = belum diriset.
+    const perkaraHtml = (arr, judul) => !Array.isArray(arr) ? "" : arr.length
+      ? `<div class="pp-case"><span class="pp-k">${judul} (${arr.length})</span><ul>${arr.map(c => `<li><b>${esc(c.jenis || "Perkara")}${c.tahun ? " · " + esc(c.tahun) : ""}</b>${c.status ? ` <span class="nm">(${esc(c.status)})</span>` : ""} — ${esc(c.uraian || "")} ${badge(c.keyakinan)}${c.sumber ? `<div class="nm">${esc(c.sumber)}</div>` : ""}</li>`).join("")}</ul></div>`
+      : `<p class="pp-clean"><span class="pp-k">${judul}</span>Tidak ditemukan perkara bisnis, PKPU/pailit, atau sanksi OJK/BEI di sumber publik.</p>`;
     const person = o => `<article class="pp-card">
       <header><div class="pp-av">${esc(String(o.nama || "?").trim().split(/\s+/).slice(0, 2).map(w => w[0]).join("").toUpperCase())}</div>
         <div><b>${esc(o.nama)}</b><div class="nm">${esc([o.peran, o.entitas, o.porsi].filter(Boolean).join(" · "))}</div></div></header>
       ${o.latar ? `<p><span class="pp-k">Latar</span>${esc(o.latar)}</p>` : ""}
-      ${o.pengalaman ? `<p><span class="pp-k">Pengalaman</span>${esc(o.pengalaman)}</p>` : ""}
+      ${o.pengalaman ? `<p><span class="pp-k">Pengalaman</span>${tkLink(o.pengalaman)}</p>` : ""}
+      ${(o.rekamJejak || []).length ? `<div class="pp-sub"><span class="pp-k">Rekam jejak (${o.rekamJejak.length})</span><div class="tbl-x"><table class="an-lv pp-rj"><tbody>${o.rekamJejak.map(r => `<tr>
+          <td><b>${r.kode && PROFIL[r.kode] ? `<a href="#" class="tk" data-tk="${esc(r.kode)}">${esc(r.kode)}</a> ` : r.kode ? esc(r.kode) + " " : ""}${esc(r.entitas || "")}</b><div class="nm">${esc([r.peran, r.periode].filter(Boolean).join(" · "))}</div></td>
+          <td>${tkLink(r.hasil || "")} ${badge(r.keyakinan)}${r.sumber ? `<div class="nm">${esc(r.sumber)}</div>` : ""}</td></tr>`).join("")}</tbody></table></div></div>` : ""}
+      ${(o.perusahaan || []).length ? `<div class="pp-net"><span class="pp-k">Grup usaha & perusahaan (${o.perusahaan.length})</span>${o.perusahaan.map(c => `<span class="pp-chip co" title="${esc(c.sumber || "")}">${esc(c.nama)}${c.peran ? ` · ${esc(c.peran)}` : ""}${c.bidang ? `<em>${esc(c.bidang)}</em>` : ""}</span>`).join("")}</div>` : ""}
+      ${perkaraHtml(o.perkara, "Perkara & sanksi")}
       ${o.karakteristik ? `<p><span class="pp-k">Karakter</span>${esc(o.karakteristik)}</p>` : ""}
-      ${(o.jaringan || []).length ? `<div class="pp-net"><span class="pp-k">Dekat dengan</span>${o.jaringan.map(j => `<span class="pp-chip ${/terverifikasi/i.test(j.keyakinan || "") ? "ok" : "maybe"}" title="${esc(j.hubungan || "")}">${esc(j.dengan)}${j.hubungan ? ` · ${esc(String(j.hubungan).slice(0, 40))}` : ""}<em>${/terverifikasi/i.test(j.keyakinan || "") ? "terverifikasi" : "disebut media"}</em></span>`).join("")}</div>` : ""}
-      ${o.risiko && !/tidak ditemukan/i.test(o.risiko) ? `<p class="pp-risk"><span class="pp-k">Risiko</span>${esc(o.risiko)}</p>` : ""}
+      ${(o.jaringan || []).length ? `<div class="pp-net"><span class="pp-k">Jaringan (${o.jaringan.length})</span>${o.jaringan.map(j => { const [c, l] = yakin(j.keyakinan); return `<span class="pp-chip ${c}" title="${esc(j.hubungan || "")}">${tkLink(j.dengan)}${j.hubungan ? ` · ${esc(String(j.hubungan).slice(0, 60))}` : ""}<em>${l}</em></span>`; }).join("")}</div>` : ""}
+      ${o.risiko && !/^tidak ditemukan/i.test(o.risiko) ? `<p class="pp-risk"><span class="pp-k">Risiko</span>${esc(o.risiko)}</p>` : ""}
       ${src(o.sumber)}
     </article>`;
-    const rowP = (x, kom) => `<tr><td><b>${esc(x.nama)}</b><div class="nm">${esc(x.jabatan || "")}${kom && x.independen ? " · independen" : ""}</div></td>
-      <td>${x.orangPengendaliBaru ? '<span class="pill an-p-good">orang pengendali baru</span>' : '<span class="pill an-p-calm">pengurus lama</span>'}</td><td class="nm">${esc(x.latar || "")}</td></tr>`;
+    const rowP = (x, kom) => `<tr><td><b>${esc(x.nama)}</b><div class="nm">${esc(x.jabatan || "")}${kom && x.independen ? " · independen" : ""}</div>
+        ${x.orangPengendaliBaru ? '<span class="pill an-p-good">orang pengendali baru</span>' : '<span class="pill an-p-calm">pengurus lama</span>'}</td>
+      <td class="nm">${esc(x.latar || "")}
+        ${(x.riwayat || []).length ? `<div class="pp-mini"><b>Riwayat:</b> ${x.riwayat.map(esc).join(" · ")}</div>` : ""}
+        ${(x.rangkap || []).length ? `<div class="pp-mini"><b>Rangkap jabatan:</b> ${x.rangkap.map(tkLink).join(" · ")}</div>` : ""}
+        ${x.hubungan ? `<div class="pp-mini ${/pengendali|pihak lawan|afiliasi/i.test(x.hubungan) ? "pp-relt" : ""}"><b>Hubungan:</b> ${tkLink(x.hubungan)} ${x.keyakinan ? badge(x.keyakinan) : ""}</div>` : ""}
+        ${(x.sumber || []).length ? `<div class="pp-mini">Sumber: ${x.sumber.slice(0, 2).map(esc).join("; ")}</div>` : ""}</td></tr>`;
     const g = p.pengurus || {}, af = p.afiliasi || {};
+    // Rantai kepemilikan pihak lawan: lapis 1 (pemegang langsung) → … → UBO.
+    const chain = (af.strukturKepemilikan || []).slice().sort((a, b) => (a.lapis || 0) - (b.lapis || 0));
+    const nBoard = (g.direksi || []).length + (g.komisaris || []).length, nNew = [...(g.direksi || []), ...(g.komisaris || [])].filter(x => x.orangPengendaliBaru).length;
     return `<section class="pp-block"><h3>Profil pengendali (${(p.pengendali || []).length} pihak)</h3>
-      ${p.ringkas ? `<p class="pp-sum">${esc(p.ringkas)}</p>` : ""}
+      ${p.ringkas ? `<p class="pp-sum">${tkLink(p.ringkas)}</p>` : ""}
       <div class="pp-grid">${(p.pengendali || []).map(person).join("")}</div>
-      ${(g.direksi || []).length || (g.komisaris || []).length ? `<h3>Struktur pengurus</h3><div class="table-scroll"><table class="an-lv pp-tbl"><tbody>
-        ${(g.direksi || []).length ? `<tr class="pp-sec"><td colspan="3">Direksi</td></tr>${g.direksi.map(x => rowP(x, false)).join("")}` : ""}
-        ${(g.komisaris || []).length ? `<tr class="pp-sec"><td colspan="3">Komisaris</td></tr>${g.komisaris.map(x => rowP(x, true)).join("")}` : ""}
+      ${nBoard ? `<h3>Struktur pengurus <span class="nm">(${nBoard} orang · ${nNew} orang pengendali baru)</span></h3><div class="table-scroll"><table class="an-lv pp-tbl"><tbody>
+        ${(g.direksi || []).length ? `<tr class="pp-sec"><td colspan="2">Direksi</td></tr>${g.direksi.map(x => rowP(x, false)).join("")}` : ""}
+        ${(g.komisaris || []).length ? `<tr class="pp-sec"><td colspan="2">Komisaris</td></tr>${g.komisaris.map(x => rowP(x, true)).join("")}` : ""}
       </tbody></table></div>` : ""}
       ${af.pihakLawan ? `<h3>Afiliasi pihak lawan transaksi</h3><div class="pp-af">
         <div><span class="pp-k">Pihak lawan</span><b>${esc(af.pihakLawan)}</b></div>
         ${af.pengendaliPihakLawan ? `<div><span class="pp-k">Pengendali/UBO</span>${esc(af.pengendaliPihakLawan)}</div>` : ""}
+        ${chain.length ? `<div class="pp-chainw"><span class="pp-k">Rantai kepemilikan (lapis 1 = pemegang langsung → UBO)</span><div class="pp-chain">${[...new Set(chain.map(c => c.lapis ?? 0))].map(lv => `<div class="pp-lv"><small>Lapis ${esc(lv)}</small>${chain.filter(c => (c.lapis ?? 0) === lv).map(c => `<div class="pp-node"><b>${esc(c.pemilik || "–")}</b><span>${c.porsi ? esc(c.porsi) + " · " : ""}di ${esc(c.entitas || "")}</span></div>`).join("")}</div>`).join('<span class="pp-arr">→</span>')}</div></div>` : ""}
+        ${af.keuanganTarget ? `<div><span class="pp-k">Keuangan aset target</span>${esc(af.keuanganTarget)}</div>` : ""}
         ${af.karakteristik ? `<div><span class="pp-k">Karakteristik</span>${esc(af.karakteristik)}</div>` : ""}
-        ${af.hubungan ? `<div class="${/afiliasi|terafiliasi|pengendali yang sama|sama/i.test(af.hubungan) ? "pp-rel" : ""}"><span class="pp-k">Hubungan</span>${esc(af.hubungan)}</div>` : ""}
+        ${af.hubungan ? `<div class="${/(?<!tidak )terafiliasi|pengendali yang sama|catatan kritis/i.test(af.hubungan) ? "pp-rel" : ""}"><span class="pp-k">Hubungan</span>${tkLink(af.hubungan)}</div>` : ""}
+        ${(af.temuanTersembunyi || []).length ? `<div class="pp-hid"><span class="pp-k">Temuan hubungan tidak langsung (${af.temuanTersembunyi.length})</span><ul>${af.temuanTersembunyi.map(h => `<li>${tkLink(h.temuan || "")} ${badge(h.keyakinan)}${h.sumber ? `<div class="nm">${esc(h.sumber)}</div>` : ""}</li>`).join("")}</ul></div>` : ""}
+        ${perkaraHtml(af.perkaraPihakLawan, "Perkara pihak lawan")}
         ${src(af.sumber)}</div>` : ""}
-      ${(p.tidakDitemukan || []).length ? `<details class="more"><summary>Belum ditemukan di sumber publik (${p.tidakDitemukan.length})</summary><ul>${p.tidakDitemukan.slice(0, 8).map(x => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
+      ${(p.koreksi || []).length ? `<details class="more"><summary>Koreksi atas data sebelumnya (${p.koreksi.length})</summary><ul>${p.koreksi.map(x => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
+      ${(p.tidakDitemukan || []).length ? `<details class="more"><summary>Belum ditemukan di sumber publik (${p.tidakDitemukan.length})</summary><ul>${p.tidakDitemukan.map(x => `<li>${esc(x)}</li>`).join("")}</ul></details>` : ""}
     </section>`;
+  }
+
+  // ---- Rekam jejak harga pengendali (data Stockbit) ----
+  // Untuk setiap emiten yang pernah/sedang dipegang ≥5% atas nama pengendali: harga saat masuk, puncak sesudahnya,
+  // harga saat keluar (bila sudah keluar), dan harga sekarang — dari candle mingguan 3 tahun.
+  async function trackRecord(c, box, self, oldCtrl) {
+    if (!box) return;
+    const hs = (c?.holdings || []).filter(h => h.symbol && h.since).slice(0, 10);
+    if (!hs.length) { box.innerHTML = `<h3>Rekam jejak harga pengendali</h3><p class="nm">${c?.holderId ? "Riwayat kepemilikan ≥5% atas nama ini hanya di emiten ini." : "Nama pengendali tidak ditemukan di riwayat pemegang saham Stockbit; rekam jejak harga tidak bisa dihitung."}</p>`; return; }
+    box.innerHTML = `<h3>Rekam jejak harga pengendali</h3><p class="nm">Menghitung ${hs.length} emiten dari riwayat kepemilikan Stockbit…</p>`;
+    const rows = await Promise.all(hs.map(async h => {
+      try {
+        const j = await (await fetch("/api/ohlc?ticker=" + h.symbol + "&tf=3y")).json();
+        const B = (j.bars || []).filter(b => b.c > 0); if (!B.length) return { h, err: "tanpa data harga" };
+        const at = iso => { const k = B.findIndex(b => b.d >= iso); return k < 0 ? B.length - 1 : k; };
+        const i0 = at(String(h.since).slice(0, 10)), out = h.pct > 0 ? null : at(String(h.lastDate || "").slice(0, 10) || B.at(-1).d);
+        const p0 = B[i0].c, iEnd = out ?? B.length - 1;
+        let pk = i0; for (let k = i0; k <= iEnd; k++) if (B[k].h > B[pk].h) pk = k;
+        return { h, p0, d0: B[i0].d, peak: B[pk].h, dPeak: B[pk].d, exit: out != null ? B[out].c : null, now: B.at(-1).c, short: i0 === 0 && B[0].d > String(h.since).slice(0, 10) };
+      } catch { return { h, err: "gagal memuat" }; }
+    }));
+    const ok = rows.filter(r => !r.err && r.p0);
+    const res = r => (r.exit ?? r.now) / r.p0 - 1;
+    const wins = ok.filter(r => res(r) > 0).length, med = ok.length ? ok.map(res).sort((a, b) => a - b)[Math.floor(ok.length / 2)] : null;
+    const pc = v => `<span class="${v >= 0 ? "up" : "down"}">${v >= 0 ? "+" : ""}${Math.round(v * 100)}%</span>`;
+    box.innerHTML = `<h3>Rekam jejak harga pengendali <span class="nm">(${esc(c.name || "")}${oldCtrl ? " — pengendali lama/penjual" : ""})</span></h3>
+      <div class="pf-kpi">
+        <div><span class="eyebrow">Emiten tercatat</span><b>${ok.length}</b></div>
+        <div><span class="eyebrow">Hasil positif bagi yang ikut masuk</span><b>${wins}/${ok.length}</b></div>
+        <div><span class="eyebrow">Median hasil (masuk → keluar/kini)</span><b>${med == null ? "–" : pc(med)}</b></div>
+      </div>
+      <div class="tbl-x"><table class="an-lv"><thead><tr><th>Emiten</th><th>Harga pasar saat masuk</th><th class="r">Puncak sesudahnya</th><th class="r">Keluar</th><th class="r">Sekarang</th><th class="r">Hasil</th></tr></thead><tbody>
+        ${rows.map(r => r.err ? `<tr><td><b>${esc(r.h.symbol)}</b></td><td colspan="5" class="nm">${esc(r.err)}</td></tr>` : `<tr class="${r.h.symbol === self ? "hl" : ""}">
+          <td><b>${PROFIL[r.h.symbol] ? `<a href="#" class="tk" data-tk="${esc(r.h.symbol)}">${esc(r.h.symbol)}</a>` : esc(r.h.symbol)}</b>${r.h.symbol === self ? ' <span class="nm">(emiten ini)</span>' : ""}<div class="nm">${r.h.pct > 0 ? `masih ${fmt(r.h.pct, 2)}%` : "sudah keluar"}</div></td>
+          <td class="num">${rp(r.p0)}<div class="nm">${esc(fmtDate(r.d0))}${r.short ? " (data mulai)" : ""}</div></td>
+          <td class="r num">${rp(r.peak)} ${pc(r.peak / r.p0 - 1)}<div class="nm">${esc(fmtDate(r.dPeak))}</div></td>
+          <td class="r num">${r.exit != null ? rp(r.exit) : "–"}</td>
+          <td class="r num">${rp(r.now)}</td>
+          <td class="r num">${pc(res(r))}</td></tr>`).join("")}
+      </tbody></table></div>
+      <p class="disc">Harga penutupan mingguan Stockbit (3 tahun); tanggal masuk = pertama tercatat ≥5% di KSEI/IDX, keluar = transaksi terakhir saat porsi menjadi 0. "Hasil" = perubahan harga bagi investor yang membeli di harga masuk pengendali sampai pengendali keluar (atau sampai sekarang). Kepemilikan lewat entitas lain milik UBO yang sama tidak tercatat.</p>`;
+  }
+
+  // ---- Peta jaringan pengendali: orang ↔ perusahaan ↔ emiten (dari profil-pengendali.json) ----
+  const normKey = s => String(s || "").toLowerCase().replace(/\b(pt|tbk|ltd|limited|pte|inc|holdings?|group|grup)\b|[.,()]/g, " ").replace(/\s+/g, " ").trim();
+  let NET = null;
+  function netGraph() {
+    if (NET) return NET;
+    const nodes = new Map(), edges = [], tickers = Object.keys(PROFIL).filter(k => /^[A-Z]{4}$/.test(k));
+    const node = (key, label, type) => { if (!key) return null; if (!nodes.has(key)) nodes.set(key, { id: key, label, type, em: new Set() }); return nodes.get(key); };
+    const link = (a, b, label) => { if (a && b && a !== b && !edges.some(e => (e.a === a.id && e.b === b.id) || (e.a === b.id && e.b === a.id))) edges.push({ a: a.id, b: b.id, label }); };
+    tickers.forEach(t => node("em:" + t, t, "emiten"));
+    const persons = [];
+    tickers.forEach(t => {
+      const p = PROFIL[t], em = nodes.get("em:" + t);
+      (p.pengendali || []).forEach(o => {
+        const pn = node("p:" + normKey(o.nama), o.nama, "orang"); pn.em.add(t); persons.push(pn);
+        link(pn, em, o.peran || "pengendali");
+        // Entitas pengendali (badan usaha) sebagai simpul tersendiri bila berbeda dari nama orangnya.
+        String(o.entitas || "").split(/;|\s+dan\s+|,(?=\s*PT\b)/).map(s => s.trim()).filter(s => s.length > 3 && normKey(s) !== normKey(o.nama) && !/^(langsung|pribadi|perorangan|atas nama sendiri|tidak|belum|-|–)/i.test(s)).slice(0, 2).forEach(s => {
+          const en = node("e:" + normKey(s), s.replace(/\s*\(.*\)/, "").replace(/^\s*(grup|melalui)\s+/i, "").replace(/\)\s*$/, "").trim(), "entitas"); en.em.add(t); link(pn, en, "pemilik"); link(en, em, "pengendali");
+        });
+        (o.rekamJejak || []).forEach(r => { if (r.kode && r.kode !== t && PROFIL[r.kode]) { pn.em.add(r.kode); link(pn, node("em:" + r.kode, r.kode, "emiten"), "rekam jejak: " + (r.peran || "")); } });
+      });
+      const af = p.afiliasi || {};
+      // Teks pengisi (mis. "Belum ada injeksi aset", "Langsung") bukan pihak lawan..split(/[,(;]/)[0].trim().slice(0, 60); const cn = node("x:" + normKey(nm), nm, "pihak"); cn.em.add(t); link(em, cn, "pihak lawan / aset target"); }
+      [...((p.pengurus || {}).direksi || []), ...((p.pengurus || {}).komisaris || [])].forEach(x => (x.rangkap || []).forEach(r => (String(r).match(/\b[A-Z]{4}\b/g) || []).filter(c => c !== t && PROFIL[c]).forEach(c => {
+        const bn = node("p:" + normKey(x.nama), x.nama, "pengurus"); bn.em.add(t); bn.em.add(c); link(bn, em, x.jabatan || "pengurus"); link(bn, node("em:" + c, c, "emiten"), "rangkap jabatan");
+      })));
+    });
+    // Jaringan: hubungkan bila yang disebut adalah orang/entitas yang sudah ada atau sebuah kode emiten radar.
+    tickers.forEach(t => (PROFIL[t].pengendali || []).forEach(o => {
+      const pn = nodes.get("p:" + normKey(o.nama));
+      (o.jaringan || []).forEach(j => {
+        const k = normKey(j.dengan), hit = [...nodes.values()].find(n => n !== pn && n.type !== "emiten" && k && (normKey(n.label) === k || (normKey(n.label).length > 8 && k.includes(normKey(n.label)))));
+        if (hit) link(pn, hit, j.hubungan ? String(j.hubungan).slice(0, 50) : "jaringan");
+        (String(j.dengan).match(/\b[A-Z]{4}\b/g) || []).filter(c => c !== t && PROFIL[c]).forEach(c => { pn.em.add(c); link(pn, nodes.get("em:" + c), "jaringan"); });
+      });
+    }));
+    NET = { nodes: [...nodes.values()], edges };
+    return NET;
+  }
+  // Tata letak gaya (force-directed) sederhana tanpa pustaka luar; posisi awal deterministik agar stabil.
+  function layoutNet(nodes, edges, W, H) {
+    const idx = new Map(nodes.map((n, i) => [n.id, i])), P = nodes.map((n, i) => ({ x: W / 2 + Math.cos(i * 2.4) * (40 + i * 3), y: H / 2 + Math.sin(i * 2.4) * (40 + i * 3) * 0.7, vx: 0, vy: 0 }));
+    const E = edges.map(e => [idx.get(e.a), idx.get(e.b)]).filter(([a, b]) => a != null && b != null);
+    const k = Math.sqrt(W * H / Math.max(1, nodes.length)) * 0.55;
+    for (let it = 0; it < 260; it++) {
+      const t = 1 - it / 260;
+      for (let i = 0; i < P.length; i++) for (let j = i + 1; j < P.length; j++) {
+        let dx = P[i].x - P[j].x, dy = P[i].y - P[j].y, d2 = dx * dx + dy * dy || 0.01; const f = k * k / d2;
+        P[i].vx += dx * f; P[i].vy += dy * f; P[j].vx -= dx * f; P[j].vy -= dy * f;
+      }
+      E.forEach(([a, b]) => { const dx = P[b].x - P[a].x, dy = P[b].y - P[a].y, d = Math.hypot(dx, dy) || 0.01, f = (d - k) / d * 0.06; P[a].vx += dx * f; P[a].vy += dy * f; P[b].vx -= dx * f; P[b].vy -= dy * f; });
+      P.forEach(p => { p.vx += (W / 2 - p.x) * 0.004; p.vy += (H / 2 - p.y) * 0.006; const v = Math.hypot(p.vx, p.vy), m = Math.min(v, 18 * t + 1); p.x += p.vx / (v || 1) * m; p.y += p.vy / (v || 1) * m; p.vx *= 0.5; p.vy *= 0.5;
+        p.x = Math.max(30, Math.min(W - 30, p.x)); p.y = Math.max(20, Math.min(H - 20, p.y)); });
+    }
+    return P;
+  }
+  const NET_TYPE = { emiten: "Emiten radar", orang: "Pengendali/UBO", entitas: "Badan usaha pengendali", pihak: "Pihak lawan/aset target", pengurus: "Pengurus rangkap" };
+  function netSvg(nodes, edges, W, H, focus) {
+    const P = layoutNet(nodes, edges, W, H), at = new Map(nodes.map((n, i) => [n.id, P[i]]));
+    const r = n => n.type === "emiten" ? 15 : n.em.size >= 2 ? 9 : 6;
+    return `<svg viewBox="0 0 ${W} ${H}" class="net-svg" role="img" aria-label="Peta jaringan pengendali">
+      ${edges.map(e => { const a = at.get(e.a), b = at.get(e.b); return a && b ? `<line class="net-e${/rekam|rangkap|jaringan/.test(e.label) ? " x" : ""}" data-a="${esc(e.a)}" data-b="${esc(e.b)}" x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}"><title>${esc(e.label)}</title></line>` : ""; }).join("")}
+      ${nodes.map((n, i) => `<g class="net-n ${n.type}${n.em.size >= 2 ? " multi" : ""}${focus === n.id ? " focus" : ""}" data-id="${esc(n.id)}" transform="translate(${P[i].x.toFixed(1)},${P[i].y.toFixed(1)})">
+        <circle r="${r(n)}"/>${n.type === "emiten" ? `<text class="net-tk" dy="4">${esc(n.label)}</text>` : `<text class="net-lb" dy="${r(n) + 11}">${esc(n.label.length > 26 ? n.label.slice(0, 25) + "…" : n.label)}</text>`}
+        <title>${esc(n.label)} · ${esc(NET_TYPE[n.type])}${n.em.size ? " · emiten: " + [...n.em].join(", ") : ""}</title></g>`).join("")}
+    </svg>`;
+  }
+  // Jaringan satu emiten: simpul dalam jarak 2 langkah.
+  function netEgoBlock(t) {
+    if (!PROFIL[t]) return "";
+    const G = netGraph(), root = "em:" + t, adj = new Map();
+    G.edges.forEach(e => { (adj.get(e.a) || adj.set(e.a, []).get(e.a)).push(e.b); (adj.get(e.b) || adj.set(e.b, []).get(e.b)).push(e.a); });
+    const keep = new Set([root]); (adj.get(root) || []).forEach(a => { keep.add(a); (adj.get(a) || []).forEach(b => keep.add(b)); });
+    const nodes = G.nodes.filter(n => keep.has(n.id)), edges = G.edges.filter(e => keep.has(e.a) && keep.has(e.b));
+    const others = nodes.filter(n => n.type === "emiten" && n.id !== root).map(n => n.label);
+    return `<section class="net-box"><h3>Peta jaringan ${esc(t)} <span class="nm">(${nodes.length} simpul${others.length ? ` · terhubung ke ${others.length} emiten radar lain: ${others.join(", ")}` : ""})</span></h3>
+      ${nodes.length > 1 ? netSvg(nodes, edges, 760, Math.min(460, 220 + nodes.length * 12), root) : '<p class="nm">Belum ada keterkaitan yang tercatat.</p>'}
+      ${netLegend()}</section>`;
+  }
+  const netLegend = () => `<div class="net-leg">${Object.entries(NET_TYPE).map(([k, l]) => `<span><i class="net-dot ${k}"></i>${l}</span>`).join("")}<span><i class="net-line x"></i>lintas emiten (rekam jejak/rangkap/jaringan)</span><span class="nm">Klik simpul untuk menyorot hubungannya; klik kode emiten untuk membuka analisanya.</span></div>`;
+  // Interaksi: klik simpul → sorot tetangganya; klik lagi simpul emiten → buka analisa.
+  function wireNet(root) {
+    root?.querySelectorAll(".net-svg").forEach(svg => {
+      svg.addEventListener("click", e => {
+        const g = e.target.closest(".net-n"); if (!g) { svg.classList.remove("hl"); svg.querySelectorAll(".on").forEach(x => x.classList.remove("on")); return; }
+        const id = g.dataset.id;
+        if (g.classList.contains("on") && id.startsWith("em:")) { const tk = id.slice(3); if ($("dlgP").open) $("dlgP").close(); show("potensi"); analyzeTicker(tk); return; }
+        svg.classList.add("hl"); svg.querySelectorAll(".on").forEach(x => x.classList.remove("on"));
+        g.classList.add("on");
+        svg.querySelectorAll(".net-e").forEach(l => { if (l.dataset.a === id || l.dataset.b === id) { l.classList.add("on"); const o = l.dataset.a === id ? l.dataset.b : l.dataset.a; svg.querySelector(`.net-n[data-id="${CSS.escape(o)}"]`)?.classList.add("on"); } });
+      });
+    });
+  }
+  // Peta jaringan seluruh radar (bagian bawah Potensi): default hanya komponen yang menghubungkan ≥2 emiten.
+  let netAll = false;
+  function renderNetwork() {
+    const box = $("netBox"); if (!box || !Object.keys(PROFIL).length) return;
+    const G = netGraph();
+    // Tata letak hanya dihitung ulang bila cakupan/datanya berubah (render() dipanggil sering).
+    const key = (netAll ? "all" : "x") + ":" + G.nodes.length + ":" + G.edges.length;
+    if (box.dataset.k === key && box.firstChild) return;
+    box.dataset.k = key;
+    let nodes = G.nodes, edges = G.edges;
+    if (!netAll) {
+      // Simpan hanya simpul non-emiten yang menyentuh ≥2 emiten, beserta emiten-emiten tersebut.
+      const bridge = new Set(G.nodes.filter(n => n.type !== "emiten" && n.em.size >= 2).map(n => n.id));
+      const keepEm = new Set(); G.nodes.filter(n => bridge.has(n.id)).forEach(n => n.em.forEach(t => keepEm.add("em:" + t)));
+      const keep = new Set([...bridge, ...keepEm]);
+      // Sertakan juga entitas perantara antara jembatan dan emiten.
+      G.edges.forEach(e => { if (bridge.has(e.a) && !keep.has(e.b) && G.nodes.find(n => n.id === e.b)?.type === "entitas") keep.add(e.b); if (bridge.has(e.b) && !keep.has(e.a) && G.nodes.find(n => n.id === e.a)?.type === "entitas") keep.add(e.a); });
+      nodes = G.nodes.filter(n => keep.has(n.id)); edges = G.edges.filter(e => keep.has(e.a) && keep.has(e.b));
+    }
+    const bridges = G.nodes.filter(n => n.type !== "emiten" && n.em.size >= 2).sort((a, b) => b.em.size - a.em.size);
+    box.innerHTML = `<div class="cyc-head"><h2>Peta jaringan pengendali</h2>
+        <div class="ta-range" role="group" aria-label="Cakupan peta"><button type="button" class="${!netAll ? "on" : ""}" data-net="0">Hanya keterkaitan lintas emiten</button><button type="button" class="${netAll ? "on" : ""}" data-net="1">Semua (${G.nodes.length} simpul)</button></div></div>
+      <p class="nm">Orang, badan usaha, pengurus, dan pihak lawan yang menghubungkan emiten-emiten di radar — dari riset profil pengendali (rekam jejak, rangkap jabatan, jaringan).</p>
+      ${bridges.length ? `<div class="net-bridges"><b>Penghubung lintas emiten (${bridges.length}):</b> ${bridges.slice(0, 14).map(n => `<span class="pp-chip">${esc(n.label)}<em>${[...n.em].map(c => `<a href="#" class="tk" data-tk="${c}">${c}</a>`).join(" ")}</em></span>`).join("")}</div>` : '<p class="nm">Belum ada orang/entitas yang tercatat menghubungkan dua emiten atau lebih.</p>'}
+      ${nodes.length > 1 ? netSvg(nodes, edges, 1100, netAll ? 900 : Math.min(760, 260 + nodes.length * 9)) : ""}
+      ${netLegend()}`;
+    box.querySelectorAll("[data-net]").forEach(b => b.onclick = () => { netAll = b.dataset.net === "1"; renderNetwork(); });
+    wireNet(box);
   }
 
   // Ringkas valuasi injeksi untuk kartu Story: nilai, kelipatan kapitalisasi, status KJPP, sektor aset.
@@ -3523,7 +3770,11 @@ dialog::backdrop{animation:fade .18s ease-out}
         ${active.length ? tbl(active) : '<div class="nm">Tidak ada kepemilikan ≥5% di emiten lain yang tercatat atas nama ini.</div>'}
         ${exited.length ? `<details class="more"><summary>Pernah memiliki (${exited.length})</summary>${tbl(exited)}</details>` : ""}
         <p class="disc">Sumber: riwayat pemegang saham ≥5% (KSEI/IDX) di Stockbit atas nama badan hukum ini${c.holderId ? "" : " — nama tidak ditemukan di riwayat, afiliasi tidak bisa dilacak"}. Kepemilikan lewat entitas lain milik UBO yang sama tidak ikut tercatat.</p>
-      </section>`;
+      </section>
+      <section class="pp-track" id="pfTrack"></section>
+      ${netEgoBlock(d.ticker)}`;
+    trackRecord(c, $("pfTrack"), d.ticker, PENGENDALI[d.ticker]?.bukanPengambilAlih);
+    wireNet(body);
     wireProfile(d);
     body.querySelectorAll("[data-pf=profile]").forEach(b => b.onclick = () => openProfile(d.id));
   }
@@ -3663,6 +3914,7 @@ dialog::backdrop{animation:fade .18s ease-out}
     box.replaceChildren(t);
     renderAgenda();
     renderCycle(prog);
+    renderNetwork();
   }
   let potSort = { key: "", dir: -1 };
 
@@ -4250,6 +4502,32 @@ dialog::backdrop{animation:fade .18s ease-out}
   ];
   const TAKEOVER_RE = /pengalihan saham|pengambilalihan|pengendali|perjanjian jual beli saham/i;
 
+  // Tahapan dari laporan (RUPSLB, HMETD, KJPP, injeksi, usaha baru) hanya diakui bila ada bukti laporannya.
+  // Membersihkan tanda lama di browser: tanpa tanggal bukti (sisa input manual/versi lama), atau laporan
+  // pada tanggal itu tidak lagi lolos aturan deteksi yang sudah diperketat.
+  function sanitizeMilestones() {
+    const RULE = Object.fromEntries(MS_RULES);
+    let changed = 0;
+    items = items.map(d => {
+      if (!d.ms) return d;
+      const ms = { ...d.ms }, auto = { ...(d.msAuto || {}) };
+      let ch = false;
+      for (const k of ["rupslb", "rights", "kjpp", "inbreng", "bisnis"]) {
+        if (!ms[k]) continue;
+        // Tanpa tanggal bukti, atau bukti terbit sebelum PTW dibayar (aksi pengendali lama) → tidak diakui.
+        const paid = ms.to_selesai && d.tender?.paydate;
+        if (!auto[k] || (paid && auto[k] <= paid)) { delete ms[k]; delete auto[k]; ch = true; continue; }
+        const same = updates.filter(u => u.ticker === d.ticker && u.date === auto[k] && /^sb-report-/.test(u.id));
+        if (RULE[k] && same.length && !same.some(u => RULE[k].test(u.title || ""))) { delete ms[k]; delete auto[k]; ch = true; }
+      }
+      if (!ch) return d;
+      changed++;
+      return { ...d, ms, msAuto: auto };
+    });
+    if (changed) lsSet(LS_KEY, items);
+    return changed;
+  }
+
   function inferMilestones(ticker, reports) {
     const i = items.findIndex(x => x.id === ticker);
     if (i < 0) return;
@@ -4473,7 +4751,15 @@ dialog::backdrop{animation:fade .18s ease-out}
   items = hasKey(LS_KEY) ? lsGet(LS_KEY, []) : SEED_ITEMS;
   // Hanya berita otomatis (Stockbit Reports dan media); catatan manual tidak dipakai lagi.
   updates = lsGet(LS_UPD, []).filter(u => !OLD_MEDIA_IDS.includes(u.id) && /^(sb-report-|news-)/.test(u.id));
+  sanitizeMilestones();
   render();
+  // Kode saham yang disebut di profil/jaringan bisa diklik: tutup popup lalu buka analisanya.
+  document.addEventListener("click", e => {
+    const a = e.target.closest("a.tk[data-tk]"); if (!a) return;
+    e.preventDefault();
+    if ($("dlgP").open) $("dlgP").close();
+    show("potensi"); analyzeTicker(a.dataset.tk);
+  });
   show(location.hash.slice(1) || lsGet(LS_VIEW, "update"));
   setSync("Mode percobaan · data tersimpan di browser ini");
 
