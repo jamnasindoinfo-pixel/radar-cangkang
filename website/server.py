@@ -2412,6 +2412,28 @@ def nama_saham(t: str, srow: dict | None = None) -> str:
             or (tsa_load("signals").get(t) or {}).get("companyName") or (tsa_load("gems").get(t) or {}).get("stockName") or "")
 
 
+_nama_memo: tuple = (0.0, {})
+
+
+def nama_semua() -> dict:
+    """{kode: nama perusahaan} dari Seasonality + snapshot tradersaham (signals/gems); memo 30 menit."""
+    global _nama_memo
+    if time.time() - _nama_memo[0] < 1800 and _nama_memo[1]:
+        return _nama_memo[1]
+    out = {}
+    for t, x in (tsa_load("gems") or {}).items():
+        if isinstance(x, dict) and x.get("stockName"):
+            out[t] = x["stockName"]
+    for t, x in (tsa_load("signals") or {}).items():
+        if isinstance(x, dict) and x.get("companyName"):
+            out[t] = x["companyName"]
+    for t, x in (season_data().get("stock") or {}).items():
+        if x.get("name"):
+            out[t] = x["name"]
+    _nama_memo = (time.time(), out)
+    return out
+
+
 def recovery_api(month: int) -> dict:
     """Saham turun >= 30% dari puncak 52 minggu, diberi skor dukungan Seasonality (bulan terpilih) & Pola Broker."""
     rd = RC.load(RECOVERY_PATH)
@@ -3462,6 +3484,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply_json(runtun_api())
         elif path == "api/ihsg-astro":
             self.reply_json(astro_api())
+        elif path == "api/nama-saham":
+            self.reply_json(nama_semua())
         elif path == "api/ihsg-live":
             self.reply_json(live_api())
         elif path == "api/ihsg-outlook":

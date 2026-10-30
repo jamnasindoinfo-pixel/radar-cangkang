@@ -7,6 +7,7 @@ import { big, fmt } from '../lib/domain.js'
 import { h } from 'vue'
 import { HSC_OPSI, isHsc, lolosHsc, hscInfo } from '../lib/hsc.js'
 import SahamRingkas from './SahamRingkas.vue'
+import { namaSaham } from '../lib/namaSaham.js'
 
 const BLN = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
 const bulan = ref(new Date().getMonth() + 1)
@@ -137,13 +138,13 @@ const tag = j => j === 'Asing' ? 't-calm' : j === 'Pemerintah' ? 't-warn' : 't-g
           <div class="dv">
             <div class="col">
               <h4 class="c-strong">Distribusi</h4>
-              <button v-for="x in bars.di" :key="x.s" type="button" class="bb l" :class="{ on: pilih === x.s }" :title="`${x.s}: ${rp(x.bandar)} · avg ${avg(x.avgDist)} · ${x.dist.map(z => z.b).join(', ')}`" @click="pilih = x.s">
+              <button v-for="x in bars.di" :key="x.s" type="button" class="bb l" :class="{ on: pilih === x.s }" :title="`${x.s}${namaSaham(x.s) ? ' (' + namaSaham(x.s) + ')' : ''}: ${rp(x.bandar)} · avg ${avg(x.avgDist)} · ${x.dist.map(z => z.b).join(', ')}`" @click="pilih = x.s">
                 <span class="v small">{{ rp(x.bandar) }}</span><i :style="{ width: bars.w(x.bandar) }" /><b>{{ x.s }}</b>
               </button>
             </div>
             <div class="col">
               <h4 class="c-good">Akumulasi</h4>
-              <button v-for="x in bars.ak" :key="x.s" type="button" class="bb r" :class="{ on: pilih === x.s }" :title="`${x.s}: ${rp(x.bandar)} · avg ${avg(x.avgAkum)} · ${x.akum.map(z => z.b).join(', ')}`" @click="pilih = x.s">
+              <button v-for="x in bars.ak" :key="x.s" type="button" class="bb r" :class="{ on: pilih === x.s }" :title="`${x.s}${namaSaham(x.s) ? ' (' + namaSaham(x.s) + ')' : ''}: ${rp(x.bandar)} · avg ${avg(x.avgAkum)} · ${x.akum.map(z => z.b).join(', ')}`" @click="pilih = x.s">
                 <b>{{ x.s }}</b><i :style="{ width: bars.w(x.bandar) }" /><span class="v small">{{ rp(x.bandar) }}</span>
               </button>
             </div>
@@ -179,7 +180,8 @@ const tag = j => j === 'Asing' ? 't-calm' : j === 'Pemerintah' ? 't-warn' : 't-g
                 <tr class="row" :class="{ open: bukaB === side[0] + x.s }" tabindex="0" @click="togel(side[0] + x.s)" @keydown.enter="togel(side[0] + x.s)">
                   <td><span class="car">{{ bukaB === side[0] + x.s ? '▾' : '▸' }}</span> <b>{{ x.s }}</b>
                     <span v-if="isHsc(x.s)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span>
-                    <span v-if="x.repo" class="tag repo" :class="x.repo.kuat ? 't-strong' : 't-warn'" :title="x.repo.alasan.join(' · ')">repo?</span></td>
+                    <span v-if="x.repo" class="tag repo" :class="x.repo.kuat ? 't-strong' : 't-warn'" :title="x.repo.alasan.join(' · ')">repo?</span>
+                    <div v-if="namaSaham(x.s)" class="small muted nm">{{ namaSaham(x.s) }}</div></td>
                   <td class="num" :class="side[2]">{{ rp(x.bandar) }}</td>
                   <td class="num">{{ lot(x.bandarLot) }}</td>
                   <td class="num"><b>{{ avg(x[side[4]]) }}</b></td>
@@ -209,7 +211,8 @@ const tag = j => j === 'Asing' ? 't-calm' : j === 'Pemerintah' ? 't-warn' : 't-g
                   <template v-for="r in x[side[0]].filter(r => lolosHsc(r.s, hsc)).slice(0, 15)" :key="r.s">
                   <tr class="row" :class="{ open: bukaB === x.m + side[0] + r.s }" tabindex="0" @click="togel(x.m + side[0] + r.s)" @keydown.enter="togel(x.m + side[0] + r.s)">
                     <td><span class="car">{{ bukaB === x.m + side[0] + r.s ? '▾' : '▸' }}</span> <b>{{ r.s }}</b>
-                      <span v-if="isHsc(r.s)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span></td>
+                      <span v-if="isHsc(r.s)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span>
+                      <div v-if="namaSaham(r.s)" class="small muted nm">{{ namaSaham(r.s) }}</div></td>
                     <td class="num">{{ lot(r.lot) }}</td>
                     <td class="num" :class="side[2]">{{ rp(r.val) }}</td>
                     <td class="num">{{ avg(r[side[3]]) }}</td>
@@ -260,4 +263,5 @@ h4{margin:6px 0}
 .field{margin-left:6px;max-width:360px}
 @media (max-width:1100px){.mo .two{grid-template-columns:1fr}}
 .row{cursor:pointer}.row:hover,.row.open{background:var(--accent-soft)}.car{color:var(--muted)}.det td{background:var(--sheet)}
+.nm{max-width:26ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}
 </style>

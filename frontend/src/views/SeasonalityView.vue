@@ -15,6 +15,7 @@ import TimeSeriesPanel from '../components/TimeSeriesPanel.vue'
 import AstronacciPanel from '../components/AstronacciPanel.vue'
 import SahamRingkas from '../components/SahamRingkas.vue'
 import IhsgOutlook from '../components/IhsgOutlook.vue'
+import { namaSaham } from '../lib/namaSaham.js'
 import RingPct from '../components/RingPct.vue'
 import { HSC_OPSI, isHsc, lolosHsc, hscInfo } from '../lib/hsc.js'
 
@@ -154,7 +155,7 @@ const heat = v => v == null ? '' : v >= 10 ? 'h3' : v >= 3 ? 'h2' : v > 0 ? 'h1'
           <button v-for="x in top5" :key="x.t" type="button" class="card" :class="{ on: kartu === x.t }" :aria-expanded="String(kartu === x.t)" @click="kartu = kartu === x.t ? '' : x.t">
             <div class="ch">
               <RingPct :v="x.prob" :size="50" label="Peluang naik" />
-              <div class="cht"><b>{{ x.t }}</b><span class="small muted">{{ x.sektorNama || 'sektor –' }}</span></div>
+              <div class="cht"><b>{{ x.t }}</b><span class="small muted">{{ x.nama || namaSaham(x.t) || x.sektorNama || 'sektor –' }}</span></div>
               <span class="skor" title="Skor prioritas 0–100">{{ x.skor }}</span>
             </div>
             <span class="small">Naik <b>{{ x.up }}/{{ x.n }}</b> · median <b>{{ pct(x.median) }}</b> · broker {{ x.broker }}<template v-if="x.radar"> · {{ x.radar }}</template></span>
@@ -178,7 +179,8 @@ const heat = v => v == null ? '' : v >= 10 ? 'h3' : v >= 3 ? 'h2' : v > 0 ? 'h1'
               <thead><tr><th>Saham</th><th class="num">Harga</th><th>Area beli</th><th class="num">Batas rugi</th><th class="num">TP1</th><th class="num">TP2</th><th class="num">R/R</th><th>Masuk</th><th>Keluar</th><th class="num">Uji historis</th></tr></thead>
               <tbody>
                 <tr v-for="x in top5.filter(y => y.plan)" :key="x.t">
-                  <td><RouterLink :to="{ path: '/emiten/' + x.t, query: { tab: 'analisa' } }"><b>{{ x.t }}</b></RouterLink></td>
+                  <td><RouterLink :to="{ path: '/emiten/' + x.t, query: { tab: 'analisa' } }"><b>{{ x.t }}</b></RouterLink>
+                    <div v-if="x.nama || namaSaham(x.t)" class="small muted nm">{{ x.nama || namaSaham(x.t) }}</div></td>
                   <td class="num">{{ rp(x.plan.harga) }}</td>
                   <td>{{ rpr(x.plan.entry) }}</td>
                   <td class="num c-strong">{{ rp(x.plan.sl) }} <span class="small">({{ x.plan.slPct }}%)</span></td>
@@ -238,7 +240,8 @@ const heat = v => v == null ? '' : v >= 10 ? 'h3' : v >= 3 ? 'h2' : v > 0 ? 'h1'
             <tbody>
               <template v-for="x in rows" :key="x.t">
                 <tr class="row" :class="{ open: buka === x.t }" tabindex="0" @click="toggle(x.t)" @keydown.enter="toggle(x.t)">
-                  <td><span class="car">{{ buka === x.t ? '▾' : '▸' }}</span> <b>{{ x.t }}</b><span v-if="isHsc(x.t)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span><span v-if="x.radar" class="tag t-calm">{{ x.radar }}</span><span v-if="x.katalis.length" class="tag t-warn" :title="x.katalis.map(k => k.jenis + ' ' + k.tanggal).join(', ')">katalis</span></td>
+                  <td><span class="car">{{ buka === x.t ? '▾' : '▸' }}</span> <b>{{ x.t }}</b><span v-if="isHsc(x.t)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span><span v-if="x.radar" class="tag t-calm">{{ x.radar }}</span><span v-if="x.katalis.length" class="tag t-warn" :title="x.katalis.map(k => k.jenis + ' ' + k.tanggal).join(', ')">katalis</span>
+                    <div v-if="x.nama || namaSaham(x.t)" class="small muted nm">{{ x.nama || namaSaham(x.t) }}</div></td>
                   <td class="small">{{ x.sektorNama || '–' }}</td>
                   <td class="num" :class="tone(x.prob)"><span class="minibar"><i :style="{ width: x.prob + '%' }" :class="tone(x.prob)" /></span>{{ x.up }}/{{ x.n }}</td>
                   <td class="num">{{ pct(x.median) }}</td>
@@ -353,4 +356,5 @@ const heat = v => v == null ? '' : v >= 10 ? 'h3' : v >= 3 ? 'h2' : v > 0 ? 'h1'
 button.card{text-align:left;font:inherit;color:inherit;cursor:pointer}.card.on{outline:2px solid var(--now-ink)}.kp{border:1px solid var(--rule);background:var(--sheet);padding:6px 12px;margin-top:10px}
 .dotlive{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--good);margin-right:6px;vertical-align:middle;animation:kedip 1.6s infinite}
 @keyframes kedip{50%{opacity:.25}}
+.nm{max-width:26ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:400}
 </style>

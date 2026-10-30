@@ -7,6 +7,7 @@ import { api } from '../api.js'
 import { fmt } from '../lib/domain.js'
 import { HSC_OPSI, isHsc, lolosHsc, hscInfo } from '../lib/hsc.js'
 import SahamRingkas from './SahamRingkas.vue'
+import { namaSaham } from '../lib/namaSaham.js'
 
 const bulan = ref(new Date().getMonth() + 1)
 const data = ref(null), err = ref(''), loading = ref(true)
@@ -93,7 +94,7 @@ const pct = v => v == null ? '–' : (v > 0 ? '+' : '') + fmt(v, 1) + '%'
               <tr class="row" :class="{ open: buka === x.t }" tabindex="0" @click="buka = buka === x.t ? '' : x.t" @keydown.enter="buka = buka === x.t ? '' : x.t">
                 <td><span class="car">{{ buka === x.t ? '▾' : '▸' }}</span> <b>{{ x.t }}</b>
                   <span v-if="isHsc(x.t)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span>
-                  <div v-if="x.nama" class="small muted nm">{{ x.nama }}</div></td>
+                  <div v-if="x.nama || namaSaham(x.t)" class="small muted nm">{{ x.nama || namaSaham(x.t) }}</div></td>
                 <td class="num">{{ rp(x.harga) }}</td>
                 <td class="num">{{ x.turun != null ? '−' + fmt(x.turun, 0) + '%' : '–' }}</td>
                 <td class="num">{{ pct(x.dariRendah) }}</td>
@@ -132,7 +133,7 @@ const pct = v => v == null ? '–' : (v > 0 ? '+' : '') + fmt(v, 1) + '%'
               <tr class="row" :class="{ open: buka === x.t }" tabindex="0" @click="buka = buka === x.t ? '' : x.t" @keydown.enter="buka = buka === x.t ? '' : x.t">
                 <td><span class="car">{{ buka === x.t ? '▾' : '▸' }}</span> <b>{{ x.t }}</b>
                   <span v-if="isHsc(x.t)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span>
-                  <div v-if="x.nama" class="small muted nm">{{ x.nama }}</div></td>
+                  <div v-if="x.nama || namaSaham(x.t)" class="small muted nm">{{ x.nama || namaSaham(x.t) }}</div></td>
                 <td class="num">{{ rp(x.tek.harga) }}</td>
                 <td class="num c-strong">−{{ fmt(x.tek.turun, 0) }}%</td>
                 <td class="num">{{ pct(x.tek.dariRendah) }}</td>

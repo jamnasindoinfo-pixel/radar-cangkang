@@ -8,6 +8,7 @@ import { fmt } from '../lib/domain.js'
 import { HSC_OPSI, isHsc, lolosHsc, hscInfo } from '../lib/hsc.js'
 import RingPct from './RingPct.vue'
 import SahamRingkas from './SahamRingkas.vue'
+import { namaSaham } from '../lib/namaSaham.js'
 
 const BLN = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des']
 const bulan = ref((new Date().getMonth() + 1) % 12 + 1)
@@ -87,6 +88,7 @@ const cls = s => s === 'Siap rebound' ? 'c-good' : s === 'Mulai pulih' ? 'c-warn
             <RingPct :v="x.cepat.skor" :size="52" label="Sinyal pulih" />
             <div><span class="muted small">#{{ i + 1 }}</span> <b class="kode">{{ x.t }}</b>
               <span v-if="isHsc(x.t)" class="tag t-warn">HSC</span>
+              <div v-if="namaSaham(x.t)" class="small muted nm">{{ namaSaham(x.t) }}</div>
               <div class="small c-good">Target 1 {{ hari(x.cepat.estimasiHari) }}</div></div>
           </div>
           <p class="small">{{ rp(x.tek.harga) }} → TP {{ rp(x.plan.tp1) }} <span class="c-good">({{ pct((x.plan.tp1 / x.tek.harga - 1) * 100) }})</span> · SL {{ rp(x.plan.sl) }}</p>
@@ -108,6 +110,7 @@ const cls = s => s === 'Siap rebound' ? 'c-good' : s === 'Mulai pulih' ? 'c-warn
             <RingPct :v="x.skor" :size="52" label="Skor recovery" />
             <div><b class="kode">{{ x.t }}</b>
               <span v-if="isHsc(x.t)" class="tag t-warn">HSC</span>
+              <div v-if="namaSaham(x.t)" class="small muted nm">{{ namaSaham(x.t) }}</div>
               <div class="small" :class="cls(x.status)">{{ x.status }}</div></div>
           </div>
           <p class="small">Turun <b>{{ fmt(x.tek.turun, 0) }}%</b> · {{ rp(x.tek.harga) }} · dari dasar {{ pct(x.tek.dariDasar) }}</p>
@@ -130,7 +133,8 @@ const cls = s => s === 'Siap rebound' ? 'c-good' : s === 'Mulai pulih' ? 'c-warn
               <tr class="row" :class="{ open: buka === x.t }" tabindex="0" @click="buka = buka === x.t ? '' : x.t" @keydown.enter="buka = buka === x.t ? '' : x.t">
                 <td><span class="car">{{ buka === x.t ? '▾' : '▸' }}</span> <b>{{ x.t }}</b>
                   <span v-if="isHsc(x.t)" class="tag t-warn" title="Saham HSC: dikeluarkan dari perhitungan IHSG">HSC</span>
-                  <span v-if="x.radar" class="tag t-calm">{{ x.radar }}</span></td>
+                  <span v-if="x.radar" class="tag t-calm">{{ x.radar }}</span>
+                  <div v-if="namaSaham(x.t)" class="small muted nm">{{ namaSaham(x.t) }}</div></td>
                 <td class="small" :class="cls(x.status)">{{ x.status }}</td>
                 <td class="num c-strong">−{{ fmt(x.tek.turun, 0) }}%</td>
                 <td class="num">{{ pct(x.tek.dariDasar) }}</td>
