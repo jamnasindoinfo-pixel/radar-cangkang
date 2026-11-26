@@ -1,0 +1,44 @@
+{
+  "nama": "Andry Hakim",
+  "julukan": "AH",
+  "asOf": "2026-11-06",
+  "peran": "Founder dan CEO Hakimson (perusahaan investasi, berdiri 2012), Founder dan CEO Coinwise, CIO Venturewise, Founder dan CIO Stockwise.",
+  "peranSumber": {"judul": "Profil Andry Hakim, Pembicara di Fortune Indonesia Investment Forum 2026", "tanggal": "2026-08-14", "url": "https://www.fortuneidn.com/market/profil-andry-hakim-d7w02-00-lflgw-nsvzq9/amp"},
+  "polaNama": ["ANDRY HAKIM"],
+  "entitas": [
+    {"nama": "HAKIMSON GROWTH CAPITAL", "status": "indikasi",
+     "ket": "Nama memuat Hakimson, perusahaan investasi yang didirikan Andry Hakim (Fortune IDN, 14 Agu 2026). Hubungan langsung PT ini dengan AH belum terverifikasi dokumen; kepemilikan lewat PT disebut pengguna."}
+  ],
+  "tambahan": [
+    {"t": "SOTS", "status": "indikasi",
+     "ket": "Tercatat 3,96% (39,6 juta saham) per data KSEI 3 Mar 2026; tidak lagi muncul di daftar pemegang ≥1% per 15 Apr 2026. Menurut pengguna masih dipegang, kemungkinan lewat PT; jalurnya belum terdeteksi di data ≥1%.",
+     "sumber": [
+       {"judul": "Andry Hakim Tercatat Sebagai Pemegang Saham RMKO-SOTS", "tanggal": "2026-03-03", "url": "https://www.idxchannel.com/market-news/andry-hakim-tercatat-sebagai-pemegang-saham-rmko-sots/all"},
+       {"judul": "Andry Hakim Tak Lagi Tercatat sebagai Investor RMKO dan SOTS", "tanggal": "2026-04-23", "url": "https://www.idxchannel.com/market-news/andry-hakim-tak-lagi-tercatat-sebagai-investor-rmko-dan-sots/all"}
+     ]}
+  ],
+  "riwayat": [
+    {"t": "RMKO", "status": "keluar dari ≥1%", "ket": "Tercatat 2,4% (30 juta saham) per KSEI 3 Mar 2026; tidak lagi di daftar ≥1% per 15 Apr 2026 (porsi di bawah 1% tidak diungkap).",
+     "sumber": [{"judul": "Andry Hakim Tak Lagi Tercatat sebagai Investor RMKO dan SOTS", "tanggal": "2026-04-23", "url": "https://www.idxchannel.com/market-news/andry-hakim-tak-lagi-tercatat-sebagai-investor-rmko-dan-sots/all"},
+       {"judul": "Andry Hakim Tercatat Sebagai Pemegang Saham RMKO-SOTS", "tanggal": "2026-03-03", "url": "https://www.idxchannel.com/market-news/andry-hakim-tercatat-sebagai-pemegang-saham-rmko-sots/all"},
+       {"judul": "Terkuak! Belvin Tannadi, Andry Hakim & Bekti Sutikna Pegang Saham Ini", "tanggal": "2026-03-04", "url": "https://www.cnbcindonesia.com/market/20260304100722-17-715823/terkuak-belvin-tannadi-andry-hakim-bekti-sutikna-pegang-saham-ini"}]},
+    {"t": "CBRE", "status": "masih", "ket": "Masuk 5% Okt 2025 (KSEI); 5,02% per 3 Mar 2026, 5,07% Apr 2026; data ≥1% Okt 2026 tinggal 2,00%.",
+     "sumber": [{"judul": "Andry Hakim Tercatat Sebagai Pemegang Saham RMKO-SOTS", "tanggal": "2026-03-03", "url": "https://www.idxchannel.com/market-news/andry-hakim-tercatat-sebagai-pemegang-saham-rmko-sots/all"},
+       {"judul": "Baru Lagi, Andry Hakim Langsung Borong Saham Dua Emiten", "tanggal": "2026-11-04", "url": "https://investor.id/market/460630/baru-lagi-andry-hakim-langsung-borong-saham-dua-emiten"}]},
+    {"t": "RISE", "status": "disebut media",
+     "ket": "IDX Channel menyebut AH sempat muncul sebagai pemegang 9,47 juta saham RISE; tanggal data tidak disebut. Tidak ada di daftar pemegang ≥1% terkini.",
+     "sumber": [{"judul": "Andry Hakim Tercatat Sebagai Pemegang Saham RMKO-SOTS", "tanggal": "2026-03-03", "url": "https://www.idxchannel.com/market-news/andry-hakim-tercatat-sebagai-pemegang-saham-rmko-sots/all"}]},
+    {"t": "BMRI", "status": "pengakuan AH",
+     "ket": "Menurut AH sendiri memegang 30 juta saham (±Rp150 miliar, dividen interim ±Rp3 miliar), dikutip IDX Channel 3 Mar 2026. Bukan data KSEI; porsinya jauh di bawah 1%.",
+     "sumber": [{"judul": "Andry Hakim Tercatat Sebagai Pemegang Saham RMKO-SOTS", "tanggal": "2026-03-03", "url": "https://www.idxchannel.com/market-news/andry-hakim-tercatat-sebagai-pemegang-saham-rmko-sots/all"}]},
+    {"t": "PANI", "status": "disebut media",
+     "ket": "IDX Channel menyebut PANI salah satu saham konglomerasi multibagger yang dimiliki AH; jumlah, porsi, dan tanggal tidak disebut, apakah masih dipegang tidak jelas.",
+     "sumber": [{"judul": "Andry Hakim Tercatat Sebagai Pemegang Saham RMKO-SOTS", "tanggal": "2026-03-03", "url": "https://www.idxchannel.com/market-news/andry-hakim-tercatat-sebagai-pemegang-saham-rmko-sots/all"}]}
+  ],
+  "sahamSedikit": {
+    "sumber": "Screener Stockbit (Current Share Outstanding dan Price), tangkapan layar pengguna 6 Nov 2026",
+    "ket": "Hanya untuk kode yang belum punya Key Stats di server; free float belum diketahui.",
+    "data": {"UNIT": [75420000, 316], "CNTB": [130000000, 250], "SIMA": [442590000, 50], "KAYU": [476900000, 18], "MTRA": [770000000, 244], "LMAS": [787850000, 50]}
+  },
+  "catatan": "Data kepemilikan dari KSEI (pemegang ≥1%, bulanan) lewat profil Stockbit. Porsi di bawah 1% dan kepemilikan lewat nominee/PT lain tidak terlihat. Status indikasi berarti belum terverifikasi dokumen."
+}

@@ -7,6 +7,7 @@ import { store, loadKandidat } from '../../store.js'
 import { api } from '../../api.js'
 import { fmtDate } from '../../lib/domain.js'
 import { LABELS, REL_TEXT, prepare, byTicker } from '../../lib/insiderFlow.js'
+import { analisaInsider } from '../../lib/insiderAnalisa.js'
 
 const props = defineProps({ ticker: { type: String, required: true } })
 const mode = ref('emiten')           // 'emiten' | 'semua'
@@ -66,6 +67,30 @@ const pct = v => (+v || 0).toLocaleString('id-ID', { maximumFractionDigits: 4 })
 const sgn = v => (v > 0 ? '+' : v < 0 ? '−' : '') + Math.abs(+v || 0).toLocaleString('id-ID', { maximumFractionDigits: 2 })
 const lembar = v => v == null ? '' : Math.abs(v) >= 1e9 ? (Math.abs(v) / 1e9).toLocaleString('id-ID', { maximumFractionDigits: 2 }) + ' M'
   : Math.abs(v) >= 1e6 ? (Math.abs(v) / 1e6).toLocaleString('id-ID', { maximumFractionDigits: 2 }) + ' jt' : Math.abs(v).toLocaleString('id-ID')
+// Unduh analisa khusus insider emiten ini (PDF): semua baris keterbukaan (bukan hanya rentang yang dipilih) ditambah
+// catatan analisa mendalam bila sudah tersimpan.
+const busyPdf = ref(false), busyGab = ref(false)
+const baruN = computed(() => mode.value === 'emiten' ? analisaInsider(raw.value).baru.length : 0)
+async function unduhInsider() {
+  busyPdf.value = true; error.value = ''
+  try {
+    const pd = await api.get('/api/pov-dalam', { ticker: props.ticker }).catch(() => null)
+    const hasil = pd?.status === 'selesai' ? pd.hasil : null
+    const a = analisaInsider(raw.value, hasil)
+    const [{ jsPDF }, P] = await Promise.all([import('jspdf'), import('../../lib/insiderPdf.js')])
+    ;(await P.insiderPdf({ t: props.ticker, nama: hasil?.nama || store.items.find(x => x.ticker === props.ticker)?.name || '', a }, jsPDF)).save(P.insiderPdfName(props.ticker, a))
+  } catch (e) { error.value = 'PDF gagal: ' + (e.message || e) } finally { busyPdf.value = false }
+}
+// Analisa gabungan: analisa mendalam tersimpan (menu POV) ditambah bagian pemegang baru >=5% dari data terbaru.
+async function unduhGabungan() {
+  busyGab.value = true; error.value = ''
+  try {
+    const pd = await api.get('/api/pov-dalam', { ticker: props.ticker })
+    if (pd?.status !== 'selesai') { error.value = `Analisa mendalam ${props.ticker} belum tersimpan. Buka menu POV, pilih ${props.ticker}, lalu tunggu analisanya selesai.`; return }
+    const [{ jsPDF }, P] = await Promise.all([import('jspdf'), import('../../lib/povDalamPdf.js')])
+    ;(await P.povDalamPdf(pd.hasil, jsPDF, analisaInsider(raw.value, pd.hasil))).save(P.povDalamPdfName(pd.hasil))
+  } catch (e) { error.value = 'PDF gagal: ' + (e.message || e) } finally { busyGab.value = false }
+}
 const ACT = { BUY: 'Beli', SELL: 'Jual', CROSS: 'Crossing', TRANSFER: 'Pengalihan', PRIVATE_PLACEMENT: 'Private placement', RIGHT_ISSUE: 'Rights issue', TENDER_OFFER: 'Tender offer' }
 const actOf = a => ACT[a] || (a ? a.charAt(0) + a.slice(1).toLowerCase().replace(/_/g, ' ') : 'belum ada')
 </script>
@@ -84,6 +109,11 @@ const actOf = a => ACT[a] || (a ? a.charAt(0) + a.slice(1).toLowerCase().replace
             :key="d" type="button" class="pill sm" :aria-pressed="String(days === d)" @click="days = d">{{ l }}</button>
         </div>
       </div>
+    </div>
+    <div v-if="mode === 'emiten' && raw.length" class="unduh">
+      <button type="button" class="pill" :disabled="busyPdf" @click="unduhInsider">{{ busyPdf ? 'Menyiapkan PDF…' : '⬇ Analisa insider (PDF)' }}</button>
+      <button type="button" class="pill" :disabled="busyGab" @click="unduhGabungan">{{ busyGab ? 'Menyiapkan PDF…' : '⬇ Analisa gabungan (PDF)' }}</button>
+      <span v-if="baruN" class="small tag t-good">{{ baruN }} pemegang baru ≥5% dalam 90 hari</span>
     </div>
     <p class="muted small sub">Keterbukaan pemegang saham dari IDX &amp; KSEI (Stockbit InsiderNews).
       <template v-if="mode === 'semua'">Hanya emiten radar, kandidat, dan emiten lain dengan perpindahan besar atau indikasi ganti pengendali.</template></p>
@@ -153,6 +183,7 @@ const actOf = a => ACT[a] || (a ? a.charAt(0) + a.slice(1).toLowerCase().replace
 </template>
 
 <style scoped>
+.unduh{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:6px 0}
 .bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .lbl{margin:0}
 .ctl{display:flex;gap:10px;flex-wrap:wrap}

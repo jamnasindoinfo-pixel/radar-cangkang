@@ -21,7 +21,7 @@ function srcOf(m, ok) {
   <div class="pc">
     <div class="row"><span class="n">{{ prog.pct }}%</span><span class="pbar" :class="{ est: prog.est }"><i :style="{ width: prog.pct + '%' }"></i></span></div>
     <small class="muted">{{ prog.est ? 'Estimasi berbasis tahap; tahapan transaksi belum terverifikasi'
-      : prog.next ? 'Katalis berikutnya: ' + prog.next.label : 'Transaksi tuntas (pascatransaksi)' }}</small>
+      : prog.next ? 'Katalis berikutnya: ' + prog.next.label : prog.pct >= 100 ? 'Transaksi tuntas (pascatransaksi)' : 'Belum ada jadwal transaksi' }}</small>
     <details v-if="!prog.est" class="det">
       <summary>Rincian {{ prog.pct }}%</summary>
       <p v-if="prog.noInject" class="muted small">Akuisisi strategis tanpa rencana injeksi: dihitung dari tahapan pengambilalihan saja.</p>

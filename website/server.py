@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import hmac
 import ipaddress
 import html as html_mod
 import json
@@ -26,13 +27,31 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import brokerpola as BP
+import rekomendasi as RK
+import auditdata as AD
+import povdalam as PD
+import povarah as PA
+import povpindai as PP
+import povgali as PG
+import beritapasar as BN
+import ihsg as IH
+import astro as AS
+import recovery as RC
+import sinkron as SK
+import harmonik as HM
+import povah as AH
+import runtun as TS
+import seasonality as SZ
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "stockbit.config.json"
@@ -76,6 +95,324 @@ def token_exp() -> int | None:
         return int(payload["exp"]) if payload.get("exp") else None
     except Exception:
         return None
+
+# ------------------------------------------------------- watcher token ----
+def watcher_status() -> dict:
+    """Keadaan stockbit-token-watcher tanpa membuka rahasia: hanya keberadaan file, waktu ubah,
+    dan waktu terbit/kedaluwarsa token (klaim iat/exp JWT)."""
+    def mtime(p: Path) -> str | None:
+        try:
+            return datetime.fromtimestamp(p.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+        except OSError:
+            return None
+    iat = None
+    t = get_token()
+    if t and "." in t:
+        try:
+            p = t.split(".")[1]
+            iat = int(json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4))).get("iat") or 0) or None
+        except Exception:
+            iat = None
+    ref = ROOT / ".stockbit-refresh"
+    return {
+        "refreshAda": ref.is_file() and ref.stat().st_size > 20,
+        "refreshDiubah": mtime(ref),                                # berubah tiap refresh sukses (token berotasi)
+        "tokenDiubah": mtime(TOKEN_PATH),
+        "tokenTerbit": datetime.fromtimestamp(iat, timezone.utc).isoformat(timespec="seconds") if iat else None,
+        "menungguIsiManual": (ROOT / ".stockbit-notify-stamp").exists() or (ROOT.parent / ".stockbit-notify-stamp").exists(),
+    }
+
+
+# ------------------------------------------- isi token dari UI + watcher bawaan ----
+# Token dan refresh token Stockbit bisa diisi dari UI (POST /api/token, hanya jaringan pribadi; domain publik 403).
+# Watcher bawaan (token_loop) memperpanjang token lewat refresh token sebelum habis, di laptop maupun jni-server.
+# Ambangnya 2 jam, lebih kecil dari stockbit-token-watcher.py (3 jam), supaya di jni-server timer systemd tetap jalan
+# lebih dulu dan keduanya jarang memakai refresh token yang sama. Refresh token berotasi: isi di satu mesin saja;
+# token akses baru menyebar ke mesin lain lewat sinkron (token yang paling lama berlaku menang).
+TOKEN_AMBANG = 2 * 3600
+TOKEN_JEDA = 15 * 60
+REFRESH_URL = "https://exodus.stockbit.com/login/refresh"
+TOKEN_STATE: dict = {"at": None, "ok": None, "pesan": ""}
+_token_lock = threading.Lock()
+_wmod = None
+JWT_RE = re.compile(r"[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*")
+
+
+def jwt_klaim(t: str) -> dict | None:
+    try:
+        p = t.split(".")[1]
+        d = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def token_bersih(t, butuh_exp: bool = True) -> str | None:
+    """JWT dari isian pengguna (boleh berawalan "Bearer "); None bila bentuknya bukan JWT."""
+    s = re.sub(r"(?i)^bearer\s+", "", str(t or "").strip())
+    if len(s) > 8000 or not JWT_RE.fullmatch(s):
+        return None
+    k = jwt_klaim(s)
+    if k is None or (butuh_exp and not k.get("exp")):
+        return None
+    return s
+
+
+def tulis_rahasia(f: Path, isi: str) -> None:
+    SK.tulis_atomik(f, (isi.strip() + "\n").encode())
+    try:
+        os.chmod(f, 0o600)
+    except OSError:
+        pass
+
+
+def _watcher_mod():
+    """stockbit-token-watcher.py (folder induk) dipakai ulang untuk membaca respons /login/refresh."""
+    global _wmod
+    if _wmod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("stockbit_token_watcher", ROOT.parent / "stockbit-token-watcher.py")
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        _wmod = m
+    return _wmod
+
+
+def refresh_post(ref: str) -> bytes:
+    req = urllib.request.Request(REFRESH_URL, data=b"", method="POST", headers={
+        "Authorization": f"Bearer {ref}", "Accept": "application/json",
+        "Origin": "https://stockbit.com", "Referer": "https://stockbit.com/", "User-Agent": UA_BROWSER})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return r.read()
+
+
+def token_uji(tok: str) -> bool:
+    """Satu panggilan ringan ke API Stockbit dengan token ini; False hanya bila ditolak (401/403). Galat jaringan
+    dianggap lolos supaya gangguan sesaat tidak membuang token yang benar."""
+    try:
+        http_get_api(SB + "/emitten/BBCA/info", tok)
+        return True
+    except urllib.error.HTTPError as e:
+        return e.code not in (401, 403)
+    except Exception:
+        return True
+
+
+def _token_catat(ok, pesan: str) -> dict:
+    TOKEN_STATE.update(at=datetime.now(timezone.utc).isoformat(timespec="seconds"), ok=ok, pesan=pesan)
+    return dict(TOKEN_STATE)
+
+
+def token_perbarui(paksa: bool = False) -> dict:
+    """Perpanjang token akses memakai refresh token bila sisa umurnya < TOKEN_AMBANG (atau paksa)."""
+    with _token_lock:
+        ref_path = ROOT / ".stockbit-refresh"
+        ref = read_token(ref_path)
+        sisa = (token_exp() or 0) - time.time()
+        if not ref:
+            return _token_catat(None, "Refresh token belum diisi, jadi token tidak bisa diperpanjang otomatis.")
+        if not paksa and sisa > TOKEN_AMBANG:
+            return _token_catat(True, f"Token masih berlaku {sisa / 3600:.1f} jam.")
+        try:
+            raw = refresh_post(ref)
+        except urllib.error.HTTPError as e:
+            return _token_catat(False, f"Stockbit menolak refresh token (HTTP {e.code}): sudah mati atau terpakai. Isi ulang dari menu Token.")
+        except Exception as e:
+            return _token_catat(False, f"Gagal menghubungi Stockbit: {e}")
+        # Cadangan respons mentah: refresh token lama sudah hangus, yang baru jangan sampai hilang.
+        tulis_rahasia(ROOT / ".stockbit-refresh-last.json", raw.decode("utf-8", "replace"))
+        try:
+            m = _watcher_mod()
+            toks = list(m.find_tokens(json.loads(raw)))
+            akses, baru = m.pick(toks, False), m.pick(toks, True)
+        except Exception:
+            toks, akses, baru = [], None, None
+        if not akses or not baru:
+            return _token_catat(False, "Format respons Stockbit tidak dikenal; token belum diganti.")
+        tulis_rahasia(ref_path, baru)   # refresh token lama sudah hangus: yang baru selalu disimpan
+        # Uji token akses baru sebelum menggantikan yang sedang dipakai (26 November 2026: token hasil perpanjangan
+        # ditolak 401 karena refresh token juga dipakai sesi browser yang masih aktif).
+        if not token_uji(akses):
+            jalur = ", ".join(sorted({p for p, _ in toks})) or "-"
+            return _token_catat(False, "Token hasil perpanjangan ditolak Stockbit, token lama tetap dipakai. Biasanya karena "
+                                "refresh token juga dipakai browser yang masih login; ambil ulang dari jendela incognito "
+                                f"lalu tutup tanpa logout. (Jalur token di respons: {jalur})")
+        token_tulis(akses)
+        exp = (jwt_klaim(akses) or {}).get("exp")
+        sampai = datetime.fromtimestamp(exp).strftime("%d-%m-%Y %H:%M") if exp else "?"
+        return _token_catat(True, f"Token diperpanjang, berlaku sampai {sampai}.")
+
+
+def token_simpan(body) -> tuple[int, dict]:
+    """POST /api/token: simpan token akses dan/atau refresh token dari UI, lalu coba perpanjang."""
+    if not isinstance(body, dict):
+        return 400, {"error": "Data tidak valid."}
+    now = time.time()
+    hasil: dict = {}
+    if str(body.get("token") or "").strip():
+        t = token_bersih(body["token"])
+        if not t:
+            return 400, {"error": "Token tidak dikenali. Salin nilai setelah kata Bearer (diawali eyJ)."}
+        if jwt_klaim(t)["exp"] <= now:
+            return 400, {"error": "Token ini sudah kedaluwarsa."}
+        token_tulis(t)
+        hasil["token"] = True
+    if str(body.get("refresh") or "").strip():
+        r = token_bersih(body["refresh"], butuh_exp=False)
+        if not r:
+            return 400, {"error": "Refresh token tidak dikenali. Salin dari respons login/refresh (diawali eyJ)."}
+        exp = jwt_klaim(r).get("exp")
+        if exp and exp <= now:
+            return 400, {"error": "Refresh token ini sudah kedaluwarsa."}
+        tulis_rahasia(ROOT / ".stockbit-refresh", r)
+        hasil["refresh"] = True
+        # Token akses ikut diisi: jangan langsung memakai refresh token (memutar rantai dan bisa mencabut token yang
+        # baru ditempel); watcher memakainya saat sisa token < TOKEN_AMBANG.
+        hasil["perpanjang"] = token_perbarui(paksa=not hasil.get("token"))
+    if not hasil:
+        return 400, {"error": "Isi token atau refresh token."}
+    hasil["susulan"] = data_susulan("token diganti dari UI", paksa=True)
+    return 200, {"ok": True, **hasil, "tokenExp": token_exp(), "watcher": watcher_status()}
+
+
+def token_loop() -> None:
+    time.sleep(30)
+    while True:
+        try:
+            token_perbarui()
+            data_susulan("pemeriksaan berkala") or data_lanjutan("pemeriksaan berkala")
+        except Exception as e:
+            print(f"[token] {e}", file=sys.stderr)
+        time.sleep(TOKEN_JEDA)
+
+
+# ------------------------------------------------------------ suara TTS ----
+# Narasi video dengan suara pria Indonesia (Azure Speech, id-ID-ArdiNeural). Kunci dibaca dari env
+# AZURE_SPEECH_KEY + AZURE_SPEECH_REGION atau file .azure-speech (baris 1 kunci, baris 2 region); file
+# tidak pernah di-commit atau disajikan. Audio per kalimat disimpan di .tts-cache/ sehingga kalimat yang
+# sama tidak dibuat ulang. Pengaman kuota: batas karakter per bulan (TTS_MONTHLY_CHARS) dan per pengunjung.
+TTS_DIR = ROOT / ".tts-cache"
+TTS_KEY_FILE = ROOT / ".azure-speech"
+TTS_VOICE = os.environ.get("AZURE_SPEECH_VOICE", "id-ID-ArdiNeural")
+TTS_MONTHLY_CHARS = int(os.environ.get("TTS_MONTHLY_CHARS", "450000"))   # kuota gratis Azure F0: 500 ribu/bulan
+TTS_MAX_TEXT = 700
+TTS_IP_WINDOW, TTS_IP_LIMIT = 600, 400          # maks. 400 kalimat baru per pengunjung per 10 menit
+_tts_lock = threading.Lock()
+_tts_ip: dict = {}
+
+
+def tts_config() -> tuple[str, str] | None:
+    key, region = os.environ.get("AZURE_SPEECH_KEY"), os.environ.get("AZURE_SPEECH_REGION")
+    if not (key and region):
+        try:
+            lines = [x.strip() for x in TTS_KEY_FILE.read_text(encoding="utf-8-sig").splitlines() if x.strip() and not x.startswith("#")]
+            key, region = (lines + ["", ""])[:2]
+        except OSError:
+            return None
+    return (key, region) if key and region else None
+
+
+def tts_usage(add: int = 0) -> dict:
+    """Pemakaian karakter bulan ini (file .tts-cache/usage.json); add > 0 menambah pemakaian."""
+    month = datetime.now().strftime("%Y-%m")
+    p = TTS_DIR / "usage.json"
+    with _tts_lock:
+        try:
+            u = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            u = {}
+        if u.get("bulan") != month:
+            u = {"bulan": month, "karakter": 0}
+        if add:
+            u["karakter"] += add
+            TTS_DIR.mkdir(exist_ok=True)
+            p.write_text(json.dumps(u), encoding="utf-8")
+        return u
+
+
+_tts_key_tries: dict = {}
+
+
+def tts_try_key(key: str, region: str) -> bool:
+    """Uji kunci Azure dengan satu kalimat pendek (tanpa menyimpan)."""
+    ssml = f"<speak version='1.0' xml:lang='id-ID'><voice name='{TTS_VOICE}'>Tes suara.</voice></speak>".encode()
+    req = urllib.request.Request(f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1", data=ssml, method="POST", headers={
+        "Ocp-Apim-Subscription-Key": key, "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3", "User-Agent": "radar-backdoor"})
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status == 200 and len(r.read()) > 500
+    except Exception:
+        return False
+
+
+def tts_set_key(body, public: bool, ip: str) -> tuple[int, dict]:
+    """Pasang kunci Azure dari halaman Video. Publik: hanya sekali (saat belum ada kunci), maks. 5 percobaan/jam."""
+    if not isinstance(body, dict):
+        return 400, {"error": "Data tidak valid."}
+    key = str(body.get("key") or "").strip()
+    region = str(body.get("region") or "southeastasia").strip().lower()
+    if not re.fullmatch(r"[A-Za-z0-9]{20,100}", key) or not re.fullmatch(r"[a-z0-9]{3,30}", region):
+        return 400, {"error": "Format KEY 1 atau region tidak sesuai."}
+    if public and tts_config():
+        return 403, {"error": "Suara pria sudah aktif. Mengganti kunci hanya bisa dari jaringan server."}
+    now = time.time()
+    with _tts_lock:
+        tries = [t for t in _tts_key_tries.get(ip, []) if t > now - 3600]
+        if len(tries) >= 5:
+            return 429, {"error": "Terlalu banyak percobaan. Coba lagi dalam satu jam."}
+        _tts_key_tries[ip] = tries + [now]
+    if not tts_try_key(key, region):
+        return 400, {"error": "Kunci ditolak Azure. Periksa KEY 1 dan region (mis. southeastasia)."}
+    old = os.umask(0o077)
+    try:
+        TTS_KEY_FILE.write_text(f"{key}\n{region}\n", encoding="utf-8")
+    finally:
+        os.umask(old)
+    try:
+        os.chmod(TTS_KEY_FILE, 0o600)
+    except OSError:
+        pass
+    return 200, {"ok": True}
+
+
+def tts_audio(text: str, ip: str = "") -> bytes | None:
+    """MP3 untuk satu kalimat (dari cache bila ada). None = TTS tidak tersedia (frontend memakai suara browser)."""
+    text = re.sub(r"\s+", " ", text or "").strip()[:TTS_MAX_TEXT]
+    if not text:
+        return None
+    path = TTS_DIR / (hashlib.sha1(f"{TTS_VOICE}|{text}".encode()).hexdigest() + ".mp3")
+    if path.is_file():
+        return path.read_bytes()
+    cfg = tts_config()
+    if not cfg or tts_usage()["karakter"] + len(text) > TTS_MONTHLY_CHARS:
+        return None
+    now = time.time()
+    with _tts_lock:
+        calls = [t for t in _tts_ip.get(ip, []) if t > now - TTS_IP_WINDOW]
+        if len(calls) >= TTS_IP_LIMIT:
+            return None
+        _tts_ip[ip] = calls + [now]
+    key, region = cfg
+    esc = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    ssml = (f"<speak version='1.0' xml:lang='id-ID'><voice name='{TTS_VOICE}'>"
+            f"<prosody rate='-4%'>{esc}</prosody></voice></speak>").encode("utf-8")
+    req = urllib.request.Request(f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1", data=ssml, method="POST", headers={
+        "Ocp-Apim-Subscription-Key": key, "Content-Type": "application/ssml+xml",
+        "X-Microsoft-OutputFormat": "audio-24khz-48kbitrate-mono-mp3", "User-Agent": "radar-backdoor"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            audio = r.read()
+    except Exception as e:  # kunci salah/kuota habis/jaringan: diam-diam kembali ke suara browser
+        print(f"[tts] gagal: {str(e)[:120]}", file=sys.stderr)
+        return None
+    if not audio:
+        return None
+    TTS_DIR.mkdir(exist_ok=True)
+    path.write_bytes(audio)
+    tts_usage(len(text))
+    return audio
+
 
 # ---------------------------------------------------------------- cache ----
 # Respons Stockbit dan sumber berita disimpan di .cache.sqlite sehingga semua
@@ -125,6 +462,9 @@ def cache_ttl(url: str) -> int:
 
 # Statistik pemakaian Stockbit (1 jam terakhir) untuk /api/status.
 FRESH_MIN_AGE = 5 * 60  # fresh=1 tidak memanggil ulang salinan yang umurnya < 5 menit
+# Pengecualian tab Live: grafik IHSG intraday boleh diambil ulang bila salinan > 15 detik (hanya oleh live_loop).
+LIVE_URL = re.compile(r"/charts/IHSG/daily\?timeframe=(today|1d)$|/company-price-feed/v2/orderbook/companies/\w+$")
+LIVE_FRESH_AGE = 15
 FAIL_BACKOFF = 5 * 60   # jeda setelah panggilan gagal sebelum mencoba Stockbit lagi
 _fail_until: dict[str, int] = {}
 _stats_lock = threading.Lock()
@@ -208,7 +548,10 @@ def data_db() -> sqlite3.Connection:
                 "CREATE TABLE IF NOT EXISTS layout(ticker TEXT PRIMARY KEY, data TEXT NOT NULL);"
                 "CREATE TABLE IF NOT EXISTS kandidat_hidden(ticker TEXT PRIMARY KEY, hidden_at INTEGER NOT NULL);"
                 "CREATE TABLE IF NOT EXISTS snapshots(day TEXT NOT NULL, ticker TEXT NOT NULL, taken_at INTEGER NOT NULL,"
-                " data TEXT NOT NULL, PRIMARY KEY(day, ticker));")
+                " data TEXT NOT NULL, PRIMARY KEY(day, ticker));"
+                # Waktu suntingan manual per baris (termasuk hapus) untuk sinkron dua arah (sinkron.gabung).
+                "CREATE TABLE IF NOT EXISTS jejak(tabel TEXT NOT NULL, kunci TEXT NOT NULL, at INTEGER NOT NULL,"
+                " hapus INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(tabel, kunci));")
             _data.commit()
         return _data
 
@@ -235,8 +578,72 @@ def item_put(item: dict) -> None:
               [(item["ticker"], json.dumps(item, ensure_ascii=False), int(time.time()))])
 
 
+def jejak_catat(tabel: str, kunci: str, hapus: bool = False) -> None:
+    """Catat suntingan manual (bukan pembaruan otomatis) agar sinkron tahu sisi mana yang lebih baru."""
+    data_exec("INSERT OR REPLACE INTO jejak VALUES(?,?,?,?)", [(tabel, kunci, int(time.time()), 1 if hapus else 0)])
+
+
 def updates_all() -> list[dict]:
     return [json.loads(r[0]) for r in data_rows("SELECT data FROM updates ORDER BY date DESC")]
+
+
+def updates_unik(ups: list[dict]) -> list[dict]:
+    """Satu baris per (emiten, tanggal, judul): posting ulang atau salinan dari dua sumber tidak tampil ganda.
+    Keterbukaan resmi (sb-report) didahulukan, lalu yang terbaru diperbarui. Data tersimpan tidak diubah."""
+    pilih: dict[tuple, dict] = {}
+    for u in ups:
+        k = (u.get("ticker"), str(u.get("date") or "")[:10], re.sub(r"\s+", " ", str(u.get("title") or "")).strip().lower())
+        lama = pilih.get(k)
+        nilai = lambda x: (str(x.get("id", "")).startswith("sb-report-"), str(x.get("updatedAt") or ""))
+        if lama is None or nilai(u) > nilai(lama):
+            pilih[k] = u
+    return [u for u in ups if pilih.get((u.get("ticker"), str(u.get("date") or "")[:10],
+                                         re.sub(r"\s+", " ", str(u.get("title") or "")).strip().lower())) is u]
+
+
+# Cache hasil pencarian saham di luar radar: pencarian ulang dalam BERITA_TTL detik tidak memanggil Stockbit lagi
+# (lebih cepat, hemat kuota). Hasil kosong/galat tidak di-cache agar percobaan berikutnya langsung mengambil ulang.
+BERITA_TTL = 30 * 60
+BERITA_MAKS = 300
+_berita_cache: dict[str, tuple[float, dict]] = {}
+_berita_lock = threading.Lock()
+
+
+def berita_saham_cache(t: str, fresh: bool = False) -> dict:
+    now = time.time()
+    with _berita_lock:
+        hit = _berita_cache.get(t)
+    if hit and not fresh and now - hit[0] < BERITA_TTL:
+        return hit[1]
+    out = berita_saham(t)
+    if out.get("items"):
+        with _berita_lock:
+            _berita_cache[t] = (now, out)
+            if len(_berita_cache) > BERITA_MAKS:   # buang entri tertua
+                for k, _ in sorted(_berita_cache.items(), key=lambda kv: kv[1][0])[:len(_berita_cache) - BERITA_MAKS]:
+                    _berita_cache.pop(k, None)
+    return out
+
+
+def berita_saham(t: str) -> dict:
+    """Berita & keterbukaan terbaru satu saham BEI mana pun, diambil saat dicari (cache Stockbit) dan TIDAK disimpan
+    ke feed radar backdoor. Dipakai halaman emiten untuk kode di luar radar (berita terakhir + analisanya)."""
+    cfg = (load_config() or {}).get("reports") or {}
+    if not cfg.get("url"):
+        return {"ticker": t, "items": [], "error": "Konfigurasi laporan Stockbit belum ada."}
+    items, galat = [], []
+    for nama, ambil in (("laporan", lambda: get_reports(cfg, t, max_pages=1)), ("berita", lambda: get_sb_news(cfg, t))):
+        try:
+            items += ambil()
+        except PublicNoCache as e:
+            galat.append(str(e))
+        except Exception as e:
+            galat.append(f"{nama}: {e}"[:120])
+    items = updates_unik(sorted(items, key=lambda u: (str(u.get("date") or ""), str(u.get("id"))), reverse=True))
+    out = {"ticker": t, "nama": nama_semua().get(t, ""), "items": items[:60]}
+    if not items and galat:
+        out["error"] = galat[0]
+    return out
 
 
 def updates_put(ups: list[dict]) -> None:
@@ -370,7 +777,8 @@ def cached_text(url: str, fetch, fresh: bool = False) -> str:
         return hit
     # fresh=1 (tombol "Perbarui") tetap memakai salinan yang baru diambil < 5 menit lalu,
     # supaya klik berulang atau beberapa perangkat sekaligus tidak memanggil Stockbit lagi.
-    hit = cache_read(url, now - (FRESH_MIN_AGE if fresh else cache_ttl(url)))
+    umur = (LIVE_FRESH_AGE if LIVE_URL.search(url) else FRESH_MIN_AGE) if fresh else cache_ttl(url)
+    hit = cache_read(url, now - umur)
     if hit is None and _fail_until.get(url, 0) > now:
         # Baru saja gagal (mis. token kedaluwarsa): jangan ulangi selama jeda, pakai salinan lama.
         hit = cache_read(url, 0)
@@ -388,18 +796,29 @@ def cached_text(url: str, fetch, fresh: bool = False) -> str:
         _upstream_n += 1
         body = fetch()
     except Exception as e:
+        if LIVE_URL.search(url):
+            SB_LIVE.update(gagal=time.time(), pesan=str(e)[:120])
         _fail_until[url] = now + FAIL_BACKOFF
+        # Galat terakhir (tanpa token/kueri) untuk /api/status: jalur URL, waktu, dan pesan singkat.
+        _galat.append({"waktu": datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M:%S"),
+                       "jalur": re.sub(r"\?.*$", "", url.replace(SB, ""))[:80], "pesan": str(e)[:120]})
+        del _galat[:-15]
         old = cache_read(url, 0)
         if old is not None:
             print(f"[cache] basi dipakai ({e}): {url}", file=sys.stderr)
             return old
         raise
     _fail_until.pop(url, None)
+    if LIVE_URL.search(url):
+        SB_LIVE["ok"] = time.time()
     cache_write(url, body)
     return body
 
 # ------------------------------------------------------------- http util ----
 
+_galat: list[dict] = []
+# Panggilan data Live (grafik intraday & orderbook): waktu sukses/gagal terakhir untuk peringatan "data tertahan".
+SB_LIVE: dict = {"ok": 0.0, "gagal": 0.0, "pesan": ""}
 _inflight: dict[str, threading.Lock] = {}
 _inflight_lock = threading.Lock()
 
@@ -491,7 +910,8 @@ def news_type(title: str) -> str:
     t = title.lower()
     if re.search(r"tender|\bmto\b", t):
         return "tender"
-    if re.search(r"pengalihan saham|pengambilalihan|pengendali|akuisisi|akusisi|acquisition|caplok|negosiasi|backdoor", t):
+    if re.search(r"pengalihan saham|pengambilalihan|pengendali|akuisisi|akusisi|acquisition|caplok|negosiasi|backdoor|"
+                 r"cessie|pengalihan (hak )?(tagih|piutang)|perubahan kreditur", t):
         return "pengendali"
     if re.search(r"hmetd|hak memesan|rights issue|penambahan modal|private placement|inbreng", t):
         return "rights"
@@ -627,6 +1047,26 @@ def insider_moves(ticker: str, max_pages: int = 8, fresh: bool = False) -> list[
 def norm_name(s: str) -> str:
     s = re.sub(r"\b(PT|TBK|LTD|PTE|LIMITED|INC)\b", "", (s or "").upper())
     return re.sub(r"[^A-Z0-9]", "", s)
+
+
+def holder_key(s: str) -> str:
+    """Kunci pemegang yang tahan urutan kata: keterbukaan kadang menulis nama yang sama dengan kata tertukar
+    (mis. "TRIPLE BERKAH BERSAMA" vs "TRIPLE BERSAMA BERKAH")."""
+    s = re.sub(r"\b(PT|TBK|LTD|PTE|LIMITED|INC)\b", " ", (s or "").upper())
+    return " ".join(sorted(re.sub(r"[^A-Z0-9]+", " ", s).split()))
+
+
+def canon_names(rows: list[dict]) -> list[dict]:
+    """Seragamkan nama pemegang dengan kunci sama (per emiten) ke ejaan yang paling sering muncul."""
+    count: dict = {}
+    for r in rows:
+        k = (r.get("ticker", ""), holder_key(r["name"]))
+        count.setdefault(k, {}).setdefault(r["name"], 0)
+        count[k][r["name"]] += 1
+    best = {k: max(v.items(), key=lambda x: x[1])[0] for k, v in count.items()}
+    for r in rows:
+        r["name"] = best[(r.get("ticker", ""), holder_key(r["name"]))]
+    return rows
 
 
 def parse_pct(s) -> float:
@@ -797,7 +1237,9 @@ def get_story(ticker: str, controller: str, near: str, fresh: bool = False) -> d
         rows.append({"date": d, "name": str(m.get("name", "")).strip(), "prev": prev,
                      "cur": cur, "action": m.get("action_type") or ""})
     nc = norm_name(controller or "")
-    buys = sorted((r for r in rows if "SELL" not in r["action"] and r["cur"] > r["prev"]),
+    kor = koreksi_registrasi(ticker)
+    buys = sorted((r for r in rows if "SELL" not in r["action"] and r["cur"] > r["prev"]
+                   and r["date"].strftime("%Y-%m-%d") not in kor),
                   key=lambda r: r["cur"] - r["prev"], reverse=True)
     if re.match(r"^\d{4}-\d{2}-\d{2}$", near or ""):
         nd = datetime.strptime(near, "%Y-%m-%d")
@@ -920,7 +1362,7 @@ def get_insider(ticker: str, days: int = 180, fresh: bool = False) -> dict:
         if not j.get("data", {}).get("is_more") or (rows and min(r["date"] for r in rows) < cutoff):
             break
         time.sleep(0.2)
-    recent = [r for r in rows if r["date"] >= cutoff]
+    recent = canon_names([r for r in rows if r["date"] >= cutoff])
     groups: dict[str, list] = {}
     for r in recent:
         groups.setdefault(r["name"], []).append(r)
@@ -970,7 +1412,7 @@ def merge_ksei(rows: list[dict]) -> list[dict]:
     besar. Gabungkan menjadi satu baris per pemegang per tanggal: porsi akhir = ujung rantai. Porsi awal 0 diganti
     porsi akhir tanggal KSEI sebelumnya (bila ada di data); rantai multi-rekening tanpa riwayat → prevUnknown=True."""
     out, groups = [], {}
-    for r in rows:
+    for r in canon_names(rows):
         if r["source"] != "KSEI":
             out.append(r)
             continue
@@ -1123,6 +1565,48 @@ def convert_reports(res: dict, ticker: str, cfg_reports: dict) -> list[dict]:
                     "url": f"https://stockbit.com/post/{s.get('stream_id')}"})
     return out
 
+def convert_sb_news(res: dict, ticker: str, days: int = 365) -> list[dict]:
+    """Berita StockbitNews yang ditandai Stockbit untuk satu emiten (sumber asli: katadata, emitennews, dst.)."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    out = []
+    for s in res.get("data", {}).get("stream") or []:
+        title = str(s.get("title") or "").strip()
+        date = str(s.get("created_at") or "")[:10]
+        if not title or date < cutoff:
+            continue
+        body = re.sub(r"\s+", " ", str(s.get("content") or "")).strip().rstrip(".").removesuffix("...").strip()
+        # Cuplikan Stockbit terpotong ("..."): simpan sampai kalimat lengkap terakhir.
+        cut = max(body.rfind(". "), body.rfind("! "), body.rfind("? "))
+        if body and body[-1] not in ".!?" and cut > 40:
+            body = body[:cut + 1]
+        src = (s.get("news_feed") or {}).get("label") or (s.get("news_feed") or {}).get("source") or ""
+        out.append({"id": f"sb-news-{s.get('stream_id')}", "date": date, "ticker": ticker, "type": news_type(title),
+                    "title": title, "summary": body[:400] if len(body) > 20 else "",
+                    "source": "StockbitNews" + (f" · {src}" if src else ""),
+                    "url": f"https://stockbit.com/post/{s.get('stream_id')}"})
+    return out
+
+
+def get_sb_news(cfg_reports: dict, ticker: str, fresh: bool = False, pages: int = 1, since: str = "") -> list[dict]:
+    """Berita StockbitNews per emiten (30 per halaman): endpoint sama dengan laporan, kategori NEWS.
+    pages > 1 dipakai saat mengejar ketertinggalan; berhenti setelah melewati tanggal `since`."""
+    base = re.sub(r"category=[A-Z_]+", "category=STREAM_CATEGORY_NEWS", cfg_reports["url"])
+    base = re.sub(r"&report_type=[A-Z_]+", "", base).replace("{ticker}", ticker)
+    days = int(cfg_reports.get("days") or 365)
+    out, cursor = [], 0
+    for _ in range(max(1, pages)):
+        res = stockbit_api(re.sub(r"last_stream_id=\d+", f"last_stream_id={cursor}", base), fresh)
+        out += convert_sb_news(res, ticker, days)
+        page = res.get("data", {}).get("stream") or []
+        pag = res.get("data", {}).get("pagination", {})
+        dates = [str(x.get("created_at") or "")[:10] for x in page if x.get("created_at")]
+        if pag.get("is_last_page") or not page or (since and dates and min(dates) < since):
+            break
+        cursor = pag.get("next_cursor") or 0
+        time.sleep(0.25)
+    return out
+
+
 def get_reports(cfg_reports: dict, ticker: str, fresh: bool = False, max_pages: int | None = None) -> list[dict]:
     """Keterbukaan informasi satu emiten dari stream Stockbit (beberapa halaman, sampai batas hari)."""
     max_pages = max_pages or int(cfg_reports.get("maxPages") or 1)
@@ -1148,13 +1632,76 @@ def get_reports(cfg_reports: dict, ticker: str, fresh: bool = False, max_pages: 
 
 KANDIDAT_SIG = [
     ("akuisisi", r"pengendali|pengambilalihan|akuisisi|negosiasi|pengalihan saham|penjualan saham|jual beli saham|"
-                 r"ppjb|term sheet|nota kesepahaman|\bmou\b|investor strategis|tender|\bmto\b|backdoor|caplok"),
+                 r"ppjb|term sheet|nota kesepahaman|\bmou\b|investor strategis|tender|\bmto\b|backdoor|caplok|"
+                 # Sinyal dini: kreditur/utang berpindah ke pihak baru (mis. ANDI: cessie 21 Okt -> pengendali baru 26 Okt).
+                 r"cessie|pengalihan (hak )?(tagih|piutang)|perubahan kreditur|kreditur baru|konversi (utang|piutang|pinjaman)|"
+                 r"restrukturisasi (utang|pinjaman|kredit)|\bpkpu\b|calon (investor|pengendali)|pemegang saham (utama )?baru"),
     ("kbli", r"kegiatan usaha|\bkbli\b|perubahan nama|nama perseroan"),
     ("rights", r"hmetd|hak memesan|rights issue|penambahan modal|private placement|inbreng"),
     ("direksi", r"perubahan (susunan )?(anggota )?(direksi|dewan komisaris|komisaris|pengurus)|"
                 r"pengunduran diri (anggota )?(direk|komisaris)|pengangkatan (direk|komisaris)"),
     ("uma", r"\buma\b|unusual market|suspensi|penghentian sementara|volatilitas"),
 ]
+
+
+def market_reports(days: int = 14, pages: int = 40, fresh: bool = False, akun: str = "StockbitReports") -> list[dict]:
+    """Posting seluruh BEI dari akun Stockbit `akun` (StockbitReports = keterbukaan, StockbitNews = berita; terbaru
+    dulu) dalam `days` hari: [{ticker, date, title, url}]. Dipakai Kandidat agar laporan dan berita pergantian
+    pengendali emiten mana pun tertangkap."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    out, cursor = [], 0
+    for _ in range(pages):
+        j = stockbit_post_api(f"https://exodus.stockbit.com/stream/v3/user/{akun}",
+                              {"category": "STREAM_CATEGORY_MAIN_IDEAS", "last_stream_id": cursor, "limit": 100}, fresh)
+        d = j.get("data") or {}
+        page = d.get("stream") or []
+        for p in page:
+            day = str(p.get("created_at") or "")[:10]
+            title = re.sub(r"\s*\[[A-Z0-9]{4}\]\s*$", "", str(p.get("title") or p.get("content") or "").split(chr(10))[0]).strip()
+            for t in p.get("topics") or []:
+                if TICKER_RE.match(str(t)) and day >= cutoff:
+                    out.append({"ticker": t, "date": day, "title": title[:200], "url": f"https://stockbit.com/post/{p.get('stream_id')}"})
+        if not page or (d.get("pagination") or {}).get("is_last_page") or str(page[-1].get("created_at") or "")[:10] < cutoff:
+            break
+        cursor = (d.get("pagination") or {}).get("next_cursor") or page[-1].get("stream_id")
+        time.sleep(0.3)
+    return out
+
+
+def koreksi_registrasi(ticker: str) -> set[str]:
+    """Tanggal (± 1 hari) laporan "Registrasi Pemegang Efek (KOREKSI)" emiten ini. Pada tanggal itu KSEI bisa mencatat
+    pemegang lama seolah baru masuk dari 0% (mis. ANDI 23 Okt 2026: Central Energi Pratama 0% → 49,73%)."""
+    # Laporan registrasi bulanan disaring dari tabel berita (skipTitle), jadi dibaca langsung dari stream Stockbit.
+    out = set()
+    cfg = (load_config() or {}).get("reports") or {}
+    if not cfg.get("url"):
+        return out
+    try:
+        url = re.sub(r"last_stream_id=\d+", "last_stream_id=0", cfg["url"]).replace("{ticker}", ticker)
+        page = (stockbit_api(url).get("data") or {}).get("stream") or []
+    except Exception:
+        return out
+    for x in page:
+        title = str(x.get("title") or "")
+        if re.search(r"registrasi", title, re.I) and re.search(r"koreksi", title, re.I):
+            try:
+                d0 = datetime.strptime(str(x.get("created_at") or "")[:10], "%Y-%m-%d")
+            except ValueError:
+                continue
+            out |= {(d0 + timedelta(days=k)).strftime("%Y-%m-%d") for k in range(-1, 2)}
+    return out
+
+
+def new_controller(ticker: str, days: int = 45, fresh: bool = False) -> dict | None:
+    """Pemegang baru >= 20% (dari < 5%) di keterbukaan KSEI/IDX emiten ini dalam `days` hari terakhir.
+    Lonjakan pada tanggal laporan registrasi koreksi diabaikan (pemegang lama yang tercatat ulang)."""
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    kor = koreksi_registrasi(ticker)
+    for r in (r for r in (insider_row(m) for m in insider_moves(ticker, 1, fresh)) if r):
+        if r["date"] >= cutoff and r["prev"] < 5 and r["cur"] >= 20 and r["date"] not in kor:
+            return {"date": r["date"], "name": r["name"].title(), "pct": r["cur"],
+                    "text": f"{r['name'].title()} masuk: {r['prev']:g}% → {r['cur']:g}% ({r['source']})"}
+    return None
 
 
 def big_holder_moves(fresh: bool = False, pages: int = 60) -> list[dict]:
@@ -1203,7 +1750,7 @@ def get_kandidat(cfg: dict, fresh: bool = False) -> dict:
     global _kd_memo
     with _kd_lock:
         public = is_public_request()
-        if _kd_memo and (public or (not fresh and time.time() - _kd_memo[0] < 6 * 3600)):
+        if _kd_memo and (public or (not fresh and time.time() - _kd_memo[0] < 3 * 3600)):
             return _kd_memo[1]
         res = _kandidat(cfg, fresh)
         if not public:  # versi publik hanya membaca cache; hasilnya tidak lengkap, jangan disimpan
@@ -1324,6 +1871,238 @@ def deploy_status() -> dict | None:
         return None
 
 
+PENGENDALI_RX = re.compile(r"pengendali|pengambilalihan|akuisisi", re.I)
+# Rencana pengambilalihan emiten itu sendiri (bukan emiten yang mengakuisisi pihak lain): porsi saham yang dibeli,
+# kata caplok/ambil alih, PPJB, perjanjian jual beli saham, tender wajib, atau calon pengendali.
+# "Pengambilalihan"/"ambil alih" saja tidak dipakai: sering emiten itu sendiri yang mengambil alih perusahaan lain
+# (mis. BUMI "Pengambilalihan Mount Margaret", IMAS "Pengambilalihan Saham dalam PT Wahana Indo Trada").
+RENCANA_RX = re.compile(r"(akuisisi|caplok|membeli|beli|serap)\D{0,40}\d+([.,]\d+)?\s*(%|persen)\s*saham|"
+                        r"caplok|pengendali baru|calon pengendali|calon investor strategis|"
+                        r"penawaran tender|tender wajib|\bmto\b|\bppjb\b|perjanjian (pengikatan |bersyarat |)jual beli saham", re.I)
+RENCANA_BATAL_RX = re.compile(r"\bbatal|dibatalkan|urung|tidak jadi", re.I)
+
+
+NAMA_UMUM = {"pt", "tbk", "persero", "bank", "indonesia", "indo", "nusantara", "jaya", "makmur", "sejahtera", "utama", "abadi",
+             "prima", "mitra", "sinar", "global", "internasional", "international", "perkasa", "group", "grup", "multi", "putra",
+             "investama", "sentosa", "mandiri", "lestari", "dua", "tiga", "dan", "the"}
+
+
+def nama_khas(nama: str) -> str:
+    """Kata pertama yang khas dari nama perusahaan (mis. "indokripto" dari "Indokripto Koin Semesta Tbk"), untuk
+    mengenali emiten di judul berita yang tidak menyebut kodenya; kosong bila semua kata umum."""
+    for w in re.findall(r"[A-Za-z]+", nama or ""):
+        if len(w) >= 4 and w.lower() not in NAMA_UMUM:
+            return w.lower()
+    return ""
+
+
+def rencana_cocok(t: str, teks: str, nama: str = "", resmi: bool = False) -> bool:
+    """Judul menyebut rencana pengambilalihan emiten `t` sendiri (bukan emiten yang membeli pihak lain):
+    - pola RENCANA_RX dan tidak batal;
+    - judul harus menyebut `t`: kodenya ("(KDTN)", "$KDTN", atau "KDTN") atau kata khas namanya;
+    - bila judul menyebut kode lain dalam kurung/$, `t` harus termasuk; bila objeknya "saham XXXX" dengan kode lain,
+      ditolak (mis. "Beli 5,84% Saham ENRG Jelang MSCI" bukan tentang MSCI);
+    - `t` (kode atau namanya) disebut sebelum kata kerja aktif: emiten itulah pembelinya, ditolak (bentuk pasif
+      "Dicaplok ..." tetap dihitung); pengendali lama yang menambah porsi ("Pengendali ... Beli 5% Saham") ditolak;
+    - `resmi`: judul keterbukaan emiten itu sendiri (akun laporan Stockbit), boleh tanpa menyebut kodenya."""
+    teks = teks or ""
+    if not RENCANA_RX.search(teks) or RENCANA_BATAL_RX.search(teks):
+        return False
+    kode = {a or b for a, b in re.findall(r"\(([A-Z]{4})\)|\$([A-Z]{4})\b", teks)}
+    if kode and t not in kode:
+        return False
+    objek = re.findall(r"[Ss]aham\s+([A-Z]{4})\b", teks)
+    if objek and t not in objek:
+        return False
+    khas = nama_khas(nama)
+    posisi = [m.start() for m in re.finditer(rf"\b{t}\b", teks)]
+    if khas:
+        posisi += [m.start() for m in re.finditer(rf"\b{re.escape(khas)}", teks, re.I)]
+    if not posisi:
+        # Keterbukaan resmi emiten itu sendiri (tanpa menyebut kodenya): PPJB/tender atas saham perseroan berarti emiten
+        # itu targetnya, kecuali objeknya perusahaan lain ("... dalam PT X", "anak usaha").
+        return bool(resmi and re.search(r"\bppjb|perjanjian (pengikatan |bersyarat |)jual beli saham|penawaran tender|tender (wajib|sukarela)", teks, re.I)
+                    and not re.search(r"\b(dalam|terhadap)\s+PT\b|atas saham(-saham)? PT\b|anak (usaha|perusahaan)", teks, re.I))
+    kerja = re.search(r"(?<![a-z])(akuisisi|caplok|membeli|beli|serap)", teks, re.I)
+    if kerja and re.search(r"(?<!calon )\bpengendali\b(?! baru)", teks[:kerja.start()], re.I):
+        return False
+    # Bentuk pasif dengan pelaku tepat sesudahnya ("Sahamnya Dicaplok AKR (AKRA)"): emiten itu pelakunya (pembeli).
+    # Bila dipisah koma ("Usai Dicaplok Haji Isam, Bayan (BYAN)"), emiten itu tetap target.
+    pelaku = [rf"\b{t}\b"] + ([rf"\b{re.escape(khas)}"] if khas else [])
+    if any(re.search(rf"\bdi(caplok|akuisisi|ambil ?alih|beli)\s+(oleh\s+)?[^,.;]{{0,25}}{p}", teks, re.I) for p in pelaku):
+        return False
+    # Kode/nama emiten disebut sebelum kata kerja aktif (bukan "di-"): emiten itulah pembelinya, mis.
+    # "Semen Baturaja (SMBR) Caplok Anak Usaha". Bentuk pasif ("Dicaplok ..., Bayan (BYAN)") tetap dihitung.
+    return not (kerja and min(posisi) < kerja.start())
+RENCANA_HARI, RENCANA_MAKS = 14, 5
+
+
+# Tahap awal item otomatis dari judul bukti (tonggak sama dengan MILESTONES/MS_STAGE di frontend/src/lib/domain.js):
+# tender diumumkan -> PTW (to_umum); sudah dicaplok -> perubahan pengendalian efektif (akuisisi); PPJB/perjanjian
+# jual beli/porsi saham dibeli -> PPJB (spa). Sisanya (mis. calon pengendali) tetap penyaringan.
+TAHAP_TENDER_RX = re.compile(r"penawaran tender|tender (wajib|sukarela)|\bmto\b", re.I)
+TAHAP_EFEKTIF_RX = re.compile(r"\bdicaplok|telah diambil ?alih|resmi (mengambil ?alih|diambil ?alih)", re.I)
+TAHAP_PPJB_RX = re.compile(r"\bppjb\b|perjanjian (pengikatan |bersyarat |)jual beli|perjanjian bersyarat|"
+                           r"(akuisisi|caplok|membeli|beli|serap)\D{0,40}\d+([.,]\d+)?\s*(%|persen)\s*saham", re.I)
+
+
+def tahap_otomatis(teks: list[str]) -> tuple[str, dict]:
+    """(stage, ms) dari judul-judul bukti; tahap paling lanjut yang terbukti dipakai."""
+    gabung = " | ".join(teks)
+    if TAHAP_TENDER_RX.search(gabung):
+        return "tender", {"to_umum": True}
+    if TAHAP_EFEKTIF_RX.search(gabung):
+        return "tender", {"akuisisi": True}
+    if TAHAP_PPJB_RX.search(gabung):
+        return "spa", {"spa": True}
+    return "radar", {}
+
+
+def auto_monitor(kd: dict, now: datetime | None = None) -> list[str]:
+    """Masukkan ke Monitor secara otomatis (tahap sesuai bukti, lihat tahap_otomatis):
+    (1) pergantian pengendali terkonfirmasi: pemegang baru >= 20% di KSEI/IDX dan keterbukaan BEI tentang
+        pengendali/pengambilalihan;
+    (2) rencana pengambilalihan: keterbukaan atau berita Stockbit RENCANA_HARI hari terakhir yang menyebut saham
+        emiten itu akan dibeli/dicaplok/diambil alih (PPJB, tender wajib, dst.), maks. RENCANA_MAKS per putaran;
+        ditandai belum terkonfirmasi KSEI.
+    Emiten yang sudah di Monitor atau disembunyikan tim dari Kandidat dilewati; data yang sudah ada tidak ditimpa,
+    kecuali item otomatis yang masih di tahap penyaringan tanpa tonggak: tahapnya dinaikkan sesuai bukti."""
+    semua = items_all()
+    ada = {i["ticker"] for i in semua}
+    awal = "Otomatis: rencana pengambilalihan, belum terkonfirmasi di KSEI. "
+    for it in semua:
+        # Item "rencana" lama dicek ulang dengan aturan terbaru; yang ternyata bukan rencana pengambilalihan emiten
+        # itu (emiten itu pembeli, atau berita tentang emiten lain) dikosongkan tonggaknya dan ditandai untuk ditinjau.
+        n = it.get("notes") or ""
+        if it.get("auto") and it.get("autoJenis") == "rencana" and n.startswith(awal) \
+                and set(k for k, v in (it.get("ms") or {}).items() if v) <= {"spa", "akuisisi", "to_umum"}:
+            judul = re.sub(r" \(\d{4}-\d\d-\d\d\)\.$", "", n[len(awal):])
+            resmi = bool(re.match(r"(Keterbukaan Informasi|Penyampaian|Laporan|Pengumuman)\b", judul))
+            if not rencana_cocok(it["ticker"], judul, it.get("name") or "", resmi):
+                item_put({**it, "stage": "radar", "ms": {}, "autoJenis": "rencana-ditolak",
+                          "notes": f"Otomatis, dicek ulang: judul \"{judul}\" tidak menunjukkan {it['ticker']} akan diambil alih "
+                                   "(emiten ini pembeli, atau berita tentang emiten lain). Tinjau lalu hapus dari Monitor bila tidak relevan.",
+                          "updatedAt": datetime.now(timezone.utc).isoformat()})
+                continue
+        # Item yang sudah ditolak tetap di Penyaringan tanpa tonggak (jangan dinaikkan lagi dari judul di catatannya).
+        if it.get("autoJenis") == "rencana-ditolak":
+            if any((it.get("ms") or {}).values()) or (it.get("stage") or "radar") != "radar":
+                item_put({**it, "stage": "radar", "ms": {}, "updatedAt": datetime.now(timezone.utc).isoformat()})
+            continue
+        if it.get("auto") and not it.get("ms") and (it.get("stage") or "radar") == "radar":
+            ev = ((it.get("signals") or {}).get("akuisisi") or {}).get("ev") or []
+            st, ms = tahap_otomatis([e.get("text") or "" for e in ev] + [it.get("notes") or ""])
+            if it.get("autoJenis") != "rencana" and st == "radar":
+                st, ms = "tender", {"akuisisi": True}      # pengendali baru sudah tercatat di KSEI
+            if st != "radar":
+                item_put({**it, "stage": st, "ms": ms, "updatedAt": datetime.now(timezone.utc).isoformat()})
+    try:
+        ada |= {t for (t,) in data_rows("SELECT ticker FROM kandidat_hidden")}
+    except Exception:
+        pass
+    batas = ((now or datetime.now()) - timedelta(days=RENCANA_HARI)).strftime("%Y-%m-%d")
+    added, rencana = [], 0
+    for k in kd.get("items") or []:
+        t = k["ticker"]
+        ev = (k.get("signals") or {}).get("akuisisi", {}).get("ev") or []
+        lap = [e for e in ev if "stockbit.com/post/" in (e.get("src") or "") and PENGENDALI_RX.search(e.get("text") or "")]
+        if t in ada:
+            continue
+        if not (k.get("pengendaliBaru") and lap):
+            ren = [e for e in ev if (e.get("d") or "") >= batas and rencana_cocok(t, e.get("text") or "", k.get("name") or "",
+                                                                                     "stockbit.com/post/" in (e.get("src") or ""))]
+            if not ren or rencana >= RENCANA_MAKS:
+                continue
+            rencana += 1
+            st, ms = tahap_otomatis([e.get("text") or "" for e in ren])
+            item_put({"id": t, "ticker": t, "name": k.get("name") or "", "stage": st, "flags": k.get("flags") or {"akuisisi": True},
+                      "ms": ms, "signals": k.get("signals") or {}, "auto": True, "autoJenis": "rencana",
+                      "notes": f"Otomatis: rencana pengambilalihan, belum terkonfirmasi di KSEI. {ren[0]['text']} ({ren[0]['d']}).",
+                      "updatedAt": datetime.now(timezone.utc).isoformat()})
+            added.append(t)
+            continue
+        nc = k["pengendaliBaru"]
+        # Pemegang baru >= 20% sudah tercatat: perubahan pengendalian efektif (tahap Penyelesaian & PTW).
+        item_put({"id": t, "ticker": t, "name": k.get("name") or "", "stage": "tender", "flags": k.get("flags") or {"akuisisi": True},
+                  "ms": {"akuisisi": True}, "signals": k.get("signals") or {}, "auto": True,
+                  "notes": f"Otomatis: pergantian pengendali terkonfirmasi. {nc['text']} pada {nc['date']}; keterbukaan: {lap[0]['text']} ({lap[0]['d']}).",
+                  "updatedAt": datetime.now(timezone.utc).isoformat()})
+        added.append(t)
+    if added:
+        print(f"[kandidat] otomatis masuk Monitor: {', '.join(added)}")
+    return added
+
+
+STORY_V = 2  # sama dengan STORY_V di frontend/src/store.js (kunci story otomatis)
+
+
+def verified_pengendali() -> dict:
+    try:
+        return json.loads((ROOT / "pengendali-verified.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+STORY_TTL_MS = 7 * 86400 * 1000
+
+
+def lengkapi_items(tickers: list[str] | None = None, delay: float = 0.6) -> list[str]:
+    """Lengkapi otomatis item Monitor yang masih kosong (situs publik baca-saja tidak bisa memuatnya dari browser):
+    harga/kapitalisasi, pengendali (pemegang baru >= 20% di KSEI bila ada, selain itu profil emiten), dan story
+    otomatis (pengendali lama, pengambilalihan, bisnis lama). Isian yang sudah ada tidak ditimpa; story dimuat ulang
+    bila basi (> 7 hari) atau patokannya berubah."""
+    done = []
+    for it in items_all():
+        t = it["ticker"]
+        if tickers and t not in tickers or not TICKER_RE.match(t):
+            continue
+        new = dict(it)
+        pv = verified_pengendali().get(t) or {}
+        if pv.get("ctrlName"):
+            # Pengendali terverifikasi (pengendali-verified.json) mengalahkan data otomatis KSEI/profil.
+            new.update(ctrlName=pv["ctrlName"], ctrlPct=pv.get("ctrlPct"), ctrlGuess=False)
+        if isinstance(pv.get("ms"), dict):
+            # Tonggak terverifikasi hanya ditambahkan (tidak pernah mematikan tonggak yang sudah tercatat).
+            new["ms"] = {**(new.get("ms") or {}), **{k: True for k, v in pv["ms"].items() if v}}
+        try:
+            if new.get("price") in (None, ""):
+                q = page_quote(t)
+                if q.get("price") is not None:
+                    new["price"] = q["price"]
+                if q.get("pctChange") is not None:
+                    new["chgPct"] = q["pctChange"]
+                if not new.get("name") and q.get("name"):
+                    new["name"] = q["name"]
+            if not (new.get("ctrlName") or new.get("acquirer")):
+                nc = new_controller(t, days=180)
+                o = get_ownership(t)
+                if o.get("marketCap") and new.get("mcap") in (None, ""):
+                    new["mcap"] = round(o["marketCap"] / 1e8) / 10  # rupiah -> Rp miliar
+                if o.get("freeFloat") is not None and new.get("float") in (None, ""):
+                    new["float"] = o["freeFloat"]
+                if nc:  # pengendali baru tercatat KSEI lebih baru dari profil emiten
+                    new.update(ctrlName=nc["name"], ctrlPct=nc["pct"], ctrlGuess=False)
+                elif o.get("controllerName"):
+                    new.update(ctrlName=o["controllerName"], ctrlPct=o.get("controllerPct"), ctrlGuess=bool(o.get("controllerGuess")))
+            ctrl = ("" if new.get("ctrlGuess") else new.get("ctrlName") or "") or new.get("acquirer") or ""
+            near = (new.get("tender") or {}).get("start") or ""
+            key = f"{ctrl}|{near}|v{STORY_V}"
+            sa = new.get("storyAuto") or {}
+            if not sa or sa.get("key") != key or time.time() * 1000 - (sa.get("at") or 0) > STORY_TTL_MS:
+                st = get_story(t, re.sub(r"\s*\(.*\)$", "", ctrl), near)
+                new["storyAuto"] = {**st, "at": int(time.time() * 1000), "key": key}
+        except Exception as e:
+            print(f"[lengkapi] {t} gagal: {str(e)[:120]}", file=sys.stderr)
+            if "401" in str(e):
+                break
+        if new != it:
+            new["updatedAt"] = datetime.now(timezone.utc).isoformat()
+            item_put(new)
+            done.append(t)
+        time.sleep(delay)
+    if done:
+        print(f"[lengkapi] item dilengkapi otomatis: {', '.join(done)}", file=sys.stderr)
+    return done
+
+
 def kandidat_loop() -> None:
     """Hitung kandidat di latar belakang (setelah start, lalu tiap 6 jam) supaya halaman
     Kandidat — termasuk versi publik yang hanya membaca hasil jadi — tidak menunggu pemindaian."""
@@ -1332,10 +2111,4287 @@ def kandidat_loop() -> None:
         cfg = load_config()
         if cfg and get_token():
             try:
-                get_kandidat(cfg)
+                auto_monitor(get_kandidat(cfg))
+                lengkapi_items()
             except Exception as e:
                 print(f"[kandidat] gagal: {e}", file=sys.stderr)
-        time.sleep(6 * 3600 + 60)
+        time.sleep(3 * 3600 + 60)
+
+
+# Harga radar di server: situs publik baca-saja tidak bisa menjalankan "Sinkron Stockbit" dari browser, jadi tanpa
+# ini harga/perubahan harian di kartu Monitor tertahan sejak sinkron manual terakhir. Sumbernya halaman publik
+# Stockbit (page_quote, tanpa token); kapitalisasi & free float ikut diperbarui bila token masih berlaku.
+HARGA_GAP = 30 * 60
+HARGA_STATE: dict = {"at": None, "n": 0, "gagal": []}
+
+
+def harga_perlu(now: datetime, last: float | None) -> bool:
+    """Tiap HARGA_GAP selama jam bursa, lalu sekali sesudah penutupan bila pembaruan terakhir lebih awal dari
+    penutupan hari bursa terakhir (harga penutupan). Libur bursa tidak dikenali; panggilannya tetap lewat cache."""
+    if last is None:
+        return True
+    if ihsg_jam_bursa(now):
+        return now.timestamp() - last >= HARGA_GAP
+    w = now.astimezone(WIB)
+    d = w if (w.hour, w.minute) > (16, 30) else w - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return last < d.replace(hour=16, minute=31, second=0, microsecond=0).timestamp()
+
+
+def harga_gabung(it: dict, q: dict, o: dict | None = None) -> dict:
+    """Item baru dengan isian pasar dari quote (dan kepemilikan bila ada), meniru syncStockbit di frontend:
+    sinyal UMA/volume hanya dinyalakan, tidak pernah dimatikan; pengendali tidak disentuh."""
+    new = dict(it)
+    if q.get("price") is not None:
+        new["price"] = q["price"]
+    if q.get("pctChange") is not None:
+        new["chgPct"] = q["pctChange"]
+    vol, avg = q.get("volume"), q.get("avgVolume")
+    new["volRatio"] = round(vol / avg, 1) if vol and avg else None
+    if not new.get("name") and q.get("name"):
+        new["name"] = q["name"]
+    flags = dict(new.get("flags") or {})
+    if q.get("uma"):
+        flags["uma"] = True
+    if vol and avg and vol >= 3 * avg:
+        flags["volume"] = True
+    new["flags"] = flags
+    if o:
+        if o.get("marketCap"):
+            new["mcap"] = round(o["marketCap"] / 1e8) / 10  # rupiah -> Rp miliar
+        if o.get("freeFloat") is not None:
+            new["float"] = o["freeFloat"]
+    return new
+
+
+def segarkan_harga(fresh: bool = False, delay: float = 0.5) -> int:
+    """Perbarui harga semua item Monitor; mengembalikan jumlah item yang berubah."""
+    pakai_token = bool(get_token()) and not token_expired()
+    n, gagal = 0, []
+    for t in [it["ticker"] for it in items_all() if TICKER_RE.match(it["ticker"])]:
+        try:
+            q = page_quote(t, fresh)
+            o = None
+            if pakai_token:
+                try:
+                    o = get_ownership(t)
+                except Exception:
+                    pakai_token = False  # token ditolak: sisa emiten cukup harga dari halaman publik
+            # Baca ulang tepat sebelum menyimpan agar isian tim yang berubah sementara itu tidak tertimpa.
+            rows = data_rows("SELECT data FROM items WHERE ticker=?", (t,))
+            if not rows:
+                continue
+            it = json.loads(rows[0][0])
+            new = harga_gabung(it, q, o)
+            if new != it:
+                new["updatedAt"] = datetime.now(timezone.utc).isoformat()
+                item_put(new)
+                n += 1
+        except Exception as e:
+            gagal.append(f"{t}: {str(e)[:80]}")
+        time.sleep(delay)
+    HARGA_STATE.update(at=iso_now(), n=n, gagal=gagal[:5])
+    return n
+
+
+def harga_loop() -> None:
+    time.sleep(90)
+    last = None
+    while True:
+        now = datetime.now(timezone.utc)
+        if harga_perlu(now, last):
+            try:
+                # Sesudah penutupan ambil ulang (fresh) supaya salinan cache siang tidak tercatat sebagai harga penutupan.
+                n = segarkan_harga(fresh=not ihsg_jam_bursa(now))
+                print(f"[harga] {n} item radar diperbarui", file=sys.stderr)
+            except Exception as e:
+                print(f"[harga] gagal: {e}", file=sys.stderr)
+            last = now.timestamp()
+        time.sleep(300)
+
+
+# Pembaruan berita di server: situs publik bersifat baca-saja sehingga tidak bisa memicu sinkron dari browser.
+NEWS_GAP = 2 * 3600
+NEWS_STATE: dict = {"at": None, "added": 0, "addedNews": 0, "errors": []}
+# Tonggak yang menandakan emiten sudah keluar dari tahap penyaringan (sama dengan MS_STAGE di frontend).
+MS_KEYS = ("bisnis", "inbreng", "kjpp", "rights", "rupslb", "to_selesai", "to_umum", "akuisisi", "spa")
+
+
+def backdoor_tickers() -> list[str]:
+    out = []
+    for it in items_all():
+        ms = it.get("ms") or {}
+        if any(ms.get(k) for k in MS_KEYS) or (it.get("stage") or "radar") != "radar":
+            out.append(it["ticker"])
+    return out
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+# Stempel sinkron Stockbit terakhir yang berhasil (tidak di-commit). Bila celahnya > CATCHUP_GAP
+# (mis. token habis saat libur), sinkron berikutnya mengambil CATCHUP_PAGES halaman per emiten.
+SYNC_STATE = ROOT / ".sync-state.json"
+CATCHUP_GAP = 2 * 86400
+CATCHUP_PAGES = 4
+
+
+def sync_state() -> dict:
+    try:
+        return json.loads(SYNC_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def catchup_plan(last_ok: str | None, now: float | None = None) -> tuple[int, str]:
+    """(jumlah halaman per emiten, tanggal batas) dari stempel sinkron terakhir yang berhasil."""
+    now = time.time() if now is None else now
+    try:
+        ts = datetime.fromisoformat(str(last_ok).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return CATCHUP_PAGES, ""
+    return (CATCHUP_PAGES, str(last_ok)[:10]) if now - ts > CATCHUP_GAP else (1, str(last_ok)[:10])
+
+
+def sync_updates(cfg: dict, delay: float = 0.4) -> dict:
+    """Setara syncReports di browser: keterbukaan Stockbit per emiten backdoor + berita media,
+    digabung ke tabel updates berdasarkan id (stempel updatedAt laporan lama dipertahankan)."""
+    old = {str(u["id"]): u for u in updates_all()}
+    changed, errors, added, added_news = [], [], 0, 0
+    # Semua emiten di monitor (termasuk tahap radar) agar keterbukaan & berita tidak ada yang terlewat.
+    codes = [t for t in dict.fromkeys(it["ticker"] for it in items_all()) if TICKER_RE.match(t)]
+    st = sync_state()
+    pages, since = catchup_plan(st.get("sbOk"))
+    ok_any, unauth = False, False
+    # Token kedaluwarsa: lewati Stockbit (data cache lama tidak dihitung sebagai sinkron berhasil).
+    if cfg.get("reports") and get_token() and not token_expired():
+        if pages > 1:
+            print(f"[berita] mengejar ketertinggalan sejak {since or 'awal'}: {pages} halaman per emiten", file=sys.stderr)
+        for t in codes:
+            try:
+                # Keterbukaan (Stockbit Reports) + berita StockbitNews yang ditandai untuk emiten ini.
+                rows = get_reports(cfg["reports"], t, fresh=True, max_pages=pages) + get_sb_news(cfg["reports"], t, fresh=True, pages=pages, since=since)
+                ok_any = True
+                for it in rows:
+                    prev = old.get(it["id"])
+                    if prev is None:
+                        added += 1
+                        new = {**it, "updatedAt": iso_now()}
+                    else:
+                        new = {**prev, **it, "updatedAt": prev.get("updatedAt") or iso_now()}
+                    if new != prev:
+                        changed.append(new)
+                        old[it["id"]] = new
+            except Exception as e:
+                errors.append({"source": t, "error": str(e)[:120]})
+                if "401" in str(e):
+                    unauth = True
+                    break
+            time.sleep(delay)
+        # Stempel hanya bila seluruh emiten tersinkron dengan token yang masih berlaku.
+        if ok_any and not unauth and not token_expired():
+            st["sbOk"] = iso_now()
+            try:
+                SYNC_STATE.write_text(json.dumps(st), encoding="utf-8")
+            except OSError:
+                pass
+    if cfg.get("news"):
+        try:
+            res = get_news(cfg["news"], codes, fresh=True)
+            for it in res["items"]:
+                prev = old.get(it["id"])
+                if prev is None:
+                    added_news += 1
+                    new = {**it, "updatedAt": iso_now()}
+                else:
+                    # Tanggal artikel HTML = tanggal pertama kali terlihat; jangan ditimpa.
+                    new = {**prev, **it, "date": prev.get("date") or it["date"]}
+                if new != prev:
+                    changed.append(new)
+                    old[it["id"]] = new
+            errors += res["errors"]
+        except Exception as e:
+            errors.append({"source": "Berita media", "error": str(e)[:120]})
+    if changed:
+        updates_put(changed)
+    try:
+        added += sync_akun_reports(cfg)
+    except Exception as e:
+        errors.append({"source": "Akun StockbitReports", "error": str(e)[:120]})
+    NEWS_STATE.update({"at": iso_now(), "added": added, "addedNews": added_news, "errors": errors[:5],
+                       "sbOk": st.get("sbOk"), "catchUp": pages > 1 and ok_any})
+    return NEWS_STATE
+
+
+def sync_akun_reports(cfg: dict, days: int = 3, pages: int = 6) -> int:
+    """Sinkron cepat: postingan akun StockbitReports (seluruh BEI, terbaru dulu) untuk emiten di monitor.
+    Laporan sering muncul di akun ini lebih dulu daripada di kategori REPORTS per emiten (mis. MEJA 28 Okt 2026
+    "Rencana Penyelenggaraan Public Expose"), jadi dibaca terpisah agar tidak tertinggal. Mengembalikan jumlah baru."""
+    if not (cfg.get("reports") and get_token() and not token_expired()):
+        return 0
+    codes = {t for t in (it["ticker"] for it in items_all()) if TICKER_RE.match(t)}
+    old = {str(u["id"]): u for u in updates_all()}
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    changed, added, cursor = [], 0, 0
+    for _ in range(pages):
+        j = stockbit_post_api("https://exodus.stockbit.com/stream/v3/user/StockbitReports",
+                              {"category": "STREAM_CATEGORY_MAIN_IDEAS", "last_stream_id": cursor, "limit": 100}, True)
+        d = j.get("data") or {}
+        page = d.get("stream") or []
+        for p in page:
+            for t in p.get("topics") or []:
+                if t not in codes:
+                    continue
+                for it in convert_reports({"data": {"stream": [p]}}, t, cfg["reports"]):
+                    prev = old.get(it["id"])
+                    # Ringkasan AI Stockbit kadang menyusul: lengkapi baris lama yang masih kosong.
+                    new = {**it, "updatedAt": iso_now()} if prev is None else {**prev, **{k: v for k, v in it.items() if v}}
+                    if new != prev:
+                        added += prev is None
+                        changed.append(new)
+                        old[it["id"]] = new
+        if not page or (d.get("pagination") or {}).get("is_last_page") or str(page[-1].get("created_at") or "")[:10] < cutoff:
+            break
+        cursor = (d.get("pagination") or {}).get("next_cursor") or page[-1].get("stream_id")
+        time.sleep(0.3)
+    if changed:
+        updates_put(changed)
+    return added
+
+
+# Sinkron cepat akun StockbitReports tiap 15 menit pada jam aktif (06.00–22.00 WIB); sinkron penuh tetap tiap NEWS_GAP.
+QUICK_GAP = 15 * 60
+
+
+def news_loop() -> None:
+    """Segarkan laporan dan berita tiap NEWS_GAP detik supaya tab Berita di situs publik tetap terbaru.
+    Bila token Stockbit diganti (mis. sepulang libur), sinkron langsung dijalankan tanpa menunggu siklus."""
+    time.sleep(60)
+    while True:
+        tok = get_token()
+        cfg = load_config()
+        if cfg:
+            try:
+                r = sync_updates(cfg)
+                print(f"[berita] {r['added']} laporan, {r['addedNews']} berita baru{' (mengejar ketertinggalan)' if r.get('catchUp') else ''}", file=sys.stderr)
+                # Ada laporan baru: lengkapi ulang story/pengendali/harga saat itu juga (tidak menunggu siklus 3 jam).
+                if r.get("added") and get_token():
+                    lengkapi_items()
+            except Exception as e:
+                print(f"[berita] gagal: {e}", file=sys.stderr)
+        waited = 0
+        while waited < NEWS_GAP:
+            time.sleep(60)
+            waited += 60
+            if get_token() != tok:
+                print("[berita] token baru terdeteksi: sinkron segera", file=sys.stderr)
+                break
+            jam = datetime.now(timezone(timedelta(hours=7))).hour
+            if waited % QUICK_GAP == 0 and 6 <= jam < 22 and cfg:
+                try:
+                    n = sync_akun_reports(cfg)
+                    if n:
+                        print(f"[berita] sinkron cepat: {n} laporan baru dari akun StockbitReports", file=sys.stderr)
+                        if get_token():
+                            lengkapi_items()
+                except Exception as e:
+                    print(f"[berita] sinkron cepat gagal: {e}", file=sys.stderr)
+
+
+# ------------------------------------------------------- LK Bagus (seluruh BEI) ----
+# Laporan keuangan (interim/tahunan) dari akun StockbitReports untuk SELURUH emiten BEI, diurai dari ringkasan AI
+# Stockbit: laba/rugi bersih (dari -> menjadi, % YoY), pendapatan, margin kotor, dan pendorong (key takeaway).
+# Disimpan terpisah dari updates (bukan hanya emiten di monitor) di .lk-laporan.json; tab IHSG -> LK Bagus.
+LK_PATH = ROOT / ".lk-laporan.json"
+LK_JUDUL_RX = re.compile(r"laporan keuangan", re.I)   # judul laporan keuangan (disaring dari feed berita radar)
+LK_HARI = 400             # simpan laporan ±13 bulan (3M/1H/9M/FY) untuk menghitung kinerja per kuartal
+_LK_UNIT = {"triliun": 1e12, "miliar": 1e9, "juta": 1e6, "ribu": 1e3}
+
+
+def _lk_angka(s: str) -> float | None:
+    """'3.408,3' -> 3408.3; '-34,45' -> -34.45."""
+    try:
+        return float(str(s).replace(".", "").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def _lk_nilai(mata: str, angka: str, unit: str) -> dict | None:
+    v = _lk_angka(angka)
+    if v is None:
+        return None
+    return {"v": v * _LK_UNIT.get((unit or "").lower(), 1), "mata": "USD" if "US" in (mata or "") else "Rp"}
+
+
+_LK_UANG = r"(Rp|US\$)\s?(-?[\d.,]*\d)\s*(triliun|miliar|juta|ribu)?"
+
+
+def lk_periode(judul: str) -> str:
+    """Periode di akhir judul ringkasan, dinormalkan: 9M26, 1H26, 3M26, FY25. 'Q1 26' -> 3M26, 'H1 26' -> 1H26."""
+    m = re.search(r"\b(?:(\d)\s?([MHQ])|([QH])\s?(\d)|(FY))\s?(\d{2}|\d{4})\s*$", judul.strip(), re.I)
+    if not m:
+        m2 = re.search(r"\b(\d{4})\s*$", judul.strip())
+        return m2.group(1) if m2 else ""
+    yy = m.group(6)[-2:]
+    if m.group(5):
+        return f"FY{yy}"
+    if m.group(1):
+        n, u = m.group(1), m.group(2).upper()
+        return f"{n}{'H' if u == 'H' else 'M' if u == 'M' else 'Q'}{yy}"
+    u, n = m.group(3).upper(), m.group(4)
+    if u == "H":
+        return f"{n}H{yy}"
+    return {"1": f"3M{yy}"}.get(n, f"Q{n}{yy}")      # Q1 = 3M (kumulatif sama); Q2/Q3/Q4 kuartalan dibiarkan apa adanya
+
+
+def lk_nilai_laba(teks: list[str]) -> tuple[dict | None, dict | None]:
+    """(periode lalu, periode ini) laba/rugi bersih dari kalimat yang menyebutnya. Pola: 'dari A menjadi B',
+    'menjadi B dari A', atau 'mencapai/sebesar/menjadi B' (tanpa pembanding). Berhenti sebelum kata 'pendapatan'."""
+    for x in teks:
+        for m in re.finditer(r"(laba|rugi) (bersih|neto)((?:(?!pendapatan|beban|margin).)*)", x, re.I):
+            # "menjadi laba US$871 juta dari rugi US$178 juta": buang kata laba/rugi di depan angka.
+            k = re.sub(r"\b(dari|menjadi|mencapai|sebesar)\s+(?:laba|rugi)\s+(?=Rp|US\$)", r"\1 ", m.group(3), flags=re.I)
+            d = re.search(r"dari\s+" + _LK_UANG + r"\s+menjadi\s+" + _LK_UANG, k, re.I)
+            if d:
+                return _lk_nilai(*d.group(1, 2, 3)), _lk_nilai(*d.group(4, 5, 6))
+            d = re.search(r"menjadi\s+" + _LK_UANG + r"\s+dari\s+" + _LK_UANG, k, re.I)
+            if d:
+                return _lk_nilai(*d.group(4, 5, 6)), _lk_nilai(*d.group(1, 2, 3))
+            d = re.search(r"(?:mencapai|sebesar|menjadi)\s+" + _LK_UANG, k, re.I)
+            if d:
+                return None, _lk_nilai(*d.group(1, 2, 3))
+    return None, None
+
+
+def lk_parse(p: dict) -> dict | None:
+    """Satu posting StockbitReports berjudul 'Laporan Keuangan ...' -> ringkasan terstruktur; None bila bukan LK."""
+    title = str(p.get("title") or "")
+    if not re.search(r"laporan keuangan", title, re.I):
+        return None
+    topics = [t for t in (p.get("topics") or []) if TICKER_RE.match(t)]
+    s = p.get("summary") or {}
+    judul = str(s.get("title") or "")
+    # "Laba Neto" dipakai sebagian ringkasan; disamakan dengan "Laba Bersih".
+    judul = re.sub(r"\b(Laba|Rugi) Neto\b", r"\1 Bersih", judul)
+    if not topics or not re.search(r"(laba|rugi) bersih|berbalik (laba|untung|rugi)", judul, re.I):
+        return None
+    teks = str(s.get("summary") or "")
+    poin = [str(x) for x in (s.get("key_points") or []) if x]
+    semua = " ".join([judul, teks, *poin])
+    rec = {"id": f"lk-{p.get('stream_id')}", "t": topics[0], "tgl": str(p.get("created_at") or "")[:10],
+           "jenisLk": re.sub(r"\s*\[[A-Z0-9-]+\]\s*$", "", title).strip(), "judul": judul,
+           "nama": (re.match(r"^[A-Z0-9]{4}\s+\(([^)]+)\)", teks) or [None, ""])[1],
+           "ringkas": teks, "poin": poin, "pendorong": str(s.get("key_takeaway") or ""),
+           "url": f"https://stockbit.com/post/{p.get('stream_id')}"}
+    rec["periode"] = lk_periode(judul)
+    # Laba/rugi bersih: jenis, arah, % dari judul; nilai dari -> menjadi dari poin pertama yang menyebutnya.
+    m = re.search(r"(Laba|Rugi) Bersih\s+(Naik|Turun|Tumbuh|Melonjak|Melesat|Melambung|Bertambah|Meningkat|Anjlok|Berkurang|Menurun|Merosot|Berbalik|Menyusut|Membengkak)?\s*([\d.,]+)?\s*%?", judul, re.I)
+    jenis = (m.group(1).lower() if m else "")
+    arah = (m.group(2) or "").lower() if m else ""
+    # "Rugi Bersih Berbalik Laba" = berbalik untung; "Laba Bersih Berbalik Rugi" = berbalik rugi.
+    berbalik = bool(re.search(r"berbalik (laba|untung)", judul, re.I))
+    if re.search(r"berbalik rugi", judul, re.I):
+        jenis = "rugi"
+    rec["laba"] = {"jenis": "laba" if berbalik else jenis, "arah": "naik" if arah in ("naik", "tumbuh", "melonjak", "melesat", "melambung", "bertambah", "meningkat", "membengkak") else
+                   "turun" if arah in ("turun", "anjlok", "berkurang", "menurun", "merosot", "menyusut") else arah,
+                   "pct": _lk_angka(m.group(3)) if m and m.group(3) else None, "dari": None, "ke": None}
+    rec["laba"]["dari"], rec["laba"]["ke"] = lk_nilai_laba([*poin, teks])
+    # Tanpa angka pembanding: turunkan dari persentase YoY (naik: ke/(1+p); turun: ke/(1-p)).
+    lb = rec["laba"]
+    if lb["dari"] is None and lb["ke"] and lb["pct"] is not None and not berbalik and not re.search(r"berbalik", judul, re.I):
+        f = 1 + lb["pct"] / 100 if lb["arah"] == "naik" else 1 - lb["pct"] / 100 if lb["arah"] == "turun" and lb["pct"] < 100 else None
+        if f:
+            lb["dari"] = {"v": lb["ke"]["v"] / f, "mata": lb["ke"]["mata"], "turunan": True}
+    d = re.search(r"pendapatan\s+(meningkat|bertambah|naik|tumbuh|melonjak|turun|berkurang|menurun|merosot)\s+([\d.,]+)%(?:\s+menjadi\s+(Rp|US\$)\s?([\d.,]+)\s*(triliun|miliar|juta|ribu)?)?", teks, re.I)
+    rec["pendapatan"] = {"pct": (_lk_angka(d.group(2)) or 0) * (-1 if re.match(r"turun|berkurang|menurun|merosot", d.group(1), re.I) else 1),
+                         "ke": _lk_nilai(d.group(3), d.group(4), d.group(5)) if d.group(3) else None} if d else None
+    d = re.search(r"margin kotor[^.]*?dari\s+(-?[\d.,]+)%\s+menjadi\s+(-?[\d.,]+)%", semua, re.I)
+    rec["marginKotor"] = {"dari": _lk_angka(d.group(1)), "ke": _lk_angka(d.group(2))} if d else None
+    rec["kategori"] = lk_kategori(rec)
+    rec["catatan"] = lk_catatan(rec)
+    return rec
+
+
+def lk_kategori(r: dict) -> str:
+    """berbalik (rugi -> laba) / bagus (laba naik >= 20%) / naik / turun / rugi / lain."""
+    lb = r.get("laba") or {}
+    if lb.get("jenis") == "laba" and re.search(r"berbalik (laba|untung)", r.get("judul", ""), re.I):
+        return "berbalik"
+    if lb.get("jenis") == "rugi":
+        return "rugi"
+    if lb.get("jenis") == "laba" and lb.get("arah") == "naik":
+        return "bagus" if (lb.get("pct") or 0) >= 20 else "naik"
+    if lb.get("jenis") == "laba" and lb.get("arah") == "turun":
+        return "turun"
+    return "lain"
+
+
+def lk_catatan(r: dict) -> list[str]:
+    """Catatan kualitas laba yang terbaca dari angka (objektif, tanpa rekomendasi)."""
+    out, lb, pd, mk = [], r.get("laba") or {}, r.get("pendapatan"), r.get("marginKotor")
+    if r["kategori"] in ("bagus", "naik", "berbalik"):
+        if pd and pd["pct"] > 0:
+            out.append(f"Didukung pendapatan naik {pd['pct']:.2f}%".replace(".", ","))
+        elif pd and pd["pct"] < 0:
+            out.append("Laba naik meski pendapatan turun: cek efisiensi atau pos non-operasional")
+        if mk and mk["dari"] is not None and mk["ke"] is not None and mk["ke"] > mk["dari"]:
+            out.append(f"Margin kotor melebar {mk['dari']:g}% -> {mk['ke']:g}%".replace(".", ","))
+        d, k = (lb.get("dari") or {}).get("v"), (lb.get("ke") or {}).get("v")
+        if (lb.get("pct") or 0) >= 300 or (d and k and abs(d) * 4 < abs(k)):
+            out.append("Basis tahun lalu kecil: persentase besar dari angka awal rendah")
+    if (lb.get("ke") or {}).get("mata") == "USD":
+        out.append("Laporan dalam dolar AS")
+    return out
+
+
+def lk_load() -> dict:
+    try:
+        return json.loads(LK_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+_LK_KUNCI = threading.Lock()
+
+
+def lk_simpan(data: dict) -> None:
+    """Gabungkan dengan isi berkas saat ini (sinkron rutin dan penarikan ulang bisa berjalan bersamaan) lalu simpan."""
+    batas = (datetime.now() - timedelta(days=LK_HARI)).strftime("%Y-%m-%d")
+    with _LK_KUNCI:
+        data = {k: v for k, v in {**lk_load(), **data}.items() if v.get("tgl", "") >= batas}
+        _lk_tulis(data)
+
+
+def _lk_tulis(data: dict) -> None:
+    tmp = LK_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(LK_PATH)
+
+
+def sync_lk(days: int | None = None, pages: int | None = None) -> int:
+    """Baca akun StockbitReports (seluruh BEI) dan simpan semua laporan keuangan berikut ringkasannya.
+    Pertama kali (berkas kosong) menyusul 60 hari; selanjutnya 3 hari terakhir. Mengembalikan jumlah LK baru."""
+    if not (get_token() and not token_expired()):
+        return 0
+    data = lk_load()
+    if days is None:
+        # Pertama kali: mundur ±7 bulan agar laporan 3M dan 1H tahun berjalan ikut (dasar hitung Q2/Q3 murni).
+        lama = not data or min(r.get("tgl", "9") for r in data.values()) > (datetime.now() - timedelta(days=150)).strftime("%Y-%m-%d")
+        days, pages = (220, 700) if lama else (3, 8)
+    cutoff = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    baru, cursor = 0, 0
+    # Semua kode emiten yang muncul di stream (laporan bulanan registrasi membuat hampir semua emiten BEI tercatat):
+    # daftar seluruh kode BEI untuk Saham 50.
+    kode = bei_kode_load()
+    for hal in range(pages):
+        j = stockbit_post_api("https://exodus.stockbit.com/stream/v3/user/StockbitReports",
+                              {"category": "STREAM_CATEGORY_MAIN_IDEAS", "last_stream_id": cursor, "limit": 100}, True)
+        d = j.get("data") or {}
+        page = d.get("stream") or []
+        for p in page:
+            for t in p.get("topics") or []:
+                if TICKER_RE.match(t):
+                    kode[t] = max(kode.get(t, ""), str(p.get("created_at") or "")[:10])
+            r = lk_parse(p)
+            if r and data.get(r["id"]) != r:
+                baru += r["id"] not in data
+                data[r["id"]] = r
+        if not page or (d.get("pagination") or {}).get("is_last_page") or str(page[-1].get("created_at") or "")[:10] < cutoff:
+            break
+        # Kursor = ID posting terakhir halaman ini (next_cursor sempat melompati berbulan-bulan saat penarikan panjang).
+        cursor = page[-1].get("stream_id") or (d.get("pagination") or {}).get("next_cursor")
+        if hal % 25 == 24:
+            print(f"[lk] halaman {hal + 1}: sampai {str(page[-1].get('created_at'))[:10]}, {len(data)} laporan", file=sys.stderr)
+            lk_simpan(data)          # simpan berkala agar penarikan panjang tidak hilang bila terputus
+        time.sleep(0.3)
+    lk_simpan(data)
+    _bei_kode_tulis(kode)
+    return baru
+
+
+BEI_KODE_PATH = ROOT / ".bei-kode.json"
+
+
+def bei_kode_load() -> dict:
+    """{kode: tanggal terakhir muncul di akun StockbitReports}."""
+    try:
+        return json.loads(BEI_KODE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _bei_kode_tulis(kode: dict) -> None:
+    tmp = BEI_KODE_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(kode, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    tmp.replace(BEI_KODE_PATH)
+
+
+def lk_bertanda(r: dict) -> tuple[float | None, float | None]:
+    """Laba bersih (periode lalu, periode ini) bertanda: rugi negatif. Ringkasan Stockbit menulis nilai rugi tanpa tanda."""
+    lb = r.get("laba") or {}
+    d, k = (lb.get("dari") or {}).get("v"), (lb.get("ke") or {}).get("v")
+    j = r.get("judul", "")
+    if re.search(r"berbalik (laba|untung)", j, re.I):
+        sd, sk = -1, 1
+    elif re.search(r"berbalik rugi", j, re.I):
+        sd, sk = 1, -1
+    elif lb.get("jenis") == "rugi":
+        sd = sk = -1
+    else:
+        sd = sk = 1
+    return (sd * abs(d) if d is not None else None, sk * abs(k) if k is not None else None)
+
+
+def lk_kuartal(r9: dict, r6: dict | None, r3: dict | None) -> dict | None:
+    """Kinerja kuartal III murni: Q3 = 9M - 1H (tahun ini dan tahun lalu, angka pembanding dari laporan yang sama),
+    Q2 = 1H - 3M untuk QoQ. Angka 9M kumulatif bisa tetap naik walau Q3 sendiri melemah; ini yang diungkap di sini."""
+    if not r6:
+        return None
+    mata = ((r9.get("laba") or {}).get("ke") or {}).get("mata")
+    if mata != ((r6.get("laba") or {}).get("ke") or {}).get("mata"):
+        return None
+    d9, k9 = lk_bertanda(r9)
+    d6, k6 = lk_bertanda(r6)
+    # Ringkasan 1H kadang memuat angka lain (mis. laba komprehensif): laba 1H jauh di atas laba 9M dianggap tidak konsisten.
+    if k9 is not None and k6 is not None and abs(k6) > abs(k9) * 1.5:
+        return None
+    q3 = k9 - k6 if k9 is not None and k6 is not None else None
+    q3l = d9 - d6 if d9 is not None and d6 is not None else None
+    if q3 is None:
+        return None
+    yoy = round((q3 / q3l - 1) * 100, 1) if q3l and q3l > 0 else None
+    q2 = qoq = None
+    if r3 and ((r3.get("laba") or {}).get("ke") or {}).get("mata") == mata:
+        k3 = lk_bertanda(r3)[1]
+        if k3 is not None:
+            q2 = k6 - k3
+            qoq = round((q3 / q2 - 1) * 100, 1) if q2 > 0 else None
+
+    def pend(r):
+        p = r.get("pendapatan") or {}
+        ke = (p.get("ke") or {}).get("v")
+        return (ke / (1 + p["pct"] / 100), ke) if ke and p.get("pct") is not None and p["pct"] > -100 else (None, None)
+    (p9l, p9), (p6l, p6) = pend(r9), pend(r6)
+    pyoy = round(((p9 - p6) / (p9l - p6l) - 1) * 100, 1) if None not in (p9, p6, p9l, p6l) and p9l - p6l > 0 else None
+    status = ("rugi" if q3 <= 0 else "berbalik" if q3l is not None and q3l <= 0 else
+              "naik" if yoy is not None and yoy >= 0 else "turun" if yoy is not None else "")
+    return {"q": 3, "laba": q3, "labaLalu": q3l, "yoy": yoy, "labaSebelum": q2, "qoq": qoq, "pendYoy": pyoy, "mata": mata, "status": status,
+            "sumber": "9M dikurangi 1H (ringkasan)",
+            "melemah": r9.get("kategori") in ("bagus", "naik", "berbalik") and status in ("turun", "rugi")}
+
+
+# Laporan laba rugi PER KUARTAL dari Stockbit (findata, report_type=1): sumber utama Q3 murni, karena ringkasan AI
+# laporan 1H/3M banyak yang tidak tersedia. Disimpan ringkas per emiten di .lk-kuartal.json (bukan cache mentah).
+LKQ_PATH = ROOT / ".lk-kuartal.json"
+_LKQ_LABA = ("Laba Pemilik Entitas Induk", "Laba Bersih Yang Dapat Diatribu", "Total Laba Bersih Yang Dapat", "Laba Bersih Tahun Berjalan", "Laba Bersih Periode Berjalan")
+_LKQ_PEND = ("Total Pendapatan", "Pendapatan", "Penjualan", "Total Penjualan")
+
+
+def lkq_load() -> dict:
+    try:
+        return json.loads(LKQ_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def lkq_parse(html_report: str) -> dict:
+    """Tabel HTML findata -> {"mata", "laba": {nama baris: {Q326: nilai}}, "pend": {Q326: nilai}} (hanya 8 kuartal terakhir)."""
+    # Label periode muncul di dua kepala tabel; ambil urutan unik.
+    labels = list(dict.fromkeys(re.findall(r'data-label="([^"]+)"', html_report)))
+    mata = (re.search(r'selected_currency"\s+value="(\w+)"', html_report) or [None, "idr"])[1]
+    laba, pend, grup = {}, None, ""
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", html_report, re.S):
+        cells = [html_mod.unescape(re.sub(r"<[^>]+>", "", c)).strip() for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        if len(cells) != len(labels) + 1:
+            continue
+        nama = cells[0].rstrip(". ")
+        # "Pemilik Entitas Induk" di bawah "Laba Bersih Yang Dapat Diatribusikan..." = laba bagian pemilik (angka yang
+        # dipakai ringkasan Stockbit); yang di bawah "Laba Komprehensif ..." diabaikan.
+        if nama.startswith(("Laba Bersih Yang Dapat Diatribu", "Laba Komprehensif", "Jumlah Laba Komprehensif")):
+            grup = "laba" if nama.startswith("Laba Bersih") else "kompre"
+        if nama == "Pemilik Entitas Induk":
+            if grup == "laba" and "Laba Pemilik Entitas Induk" not in laba:
+                nama = "Laba Pemilik Entitas Induk"
+            else:
+                continue
+        nilai = {}
+        for lb, v in list(zip(labels, cells[1:]))[-8:]:
+            try:
+                nilai[lb] = float(v.replace(",", ""))
+            except ValueError:
+                pass
+        if any(nama.startswith(k.rstrip(". ")) for k in _LKQ_LABA) and nama not in laba:
+            laba[nama] = nilai
+        if pend is None and nama in _LKQ_PEND:
+            pend = nilai
+    return {"mata": "USD" if mata.lower() == "usd" else "Rp", "laba": laba, "pend": pend or {}}
+
+
+def sync_lk_kuartal(batas: int | None = None) -> int:
+    """Ambil laba rugi kuartalan untuk emiten yang laporan terakhirnya 3M/1H/9M/FY dan belum punya data kuartal mutakhir."""
+    if not (get_token() and not token_expired()):
+        return 0
+    data, kw = lk_load(), lkq_load()
+    terakhir = {}
+    for r in sorted(data.values(), key=lambda r: r.get("tgl", "")):
+        terakhir[r["t"]] = r
+    hari_ini = datetime.now().strftime("%Y-%m-%d")
+    def kode_q(r):
+        pk = lk_periode_kuartal(r.get("periode") or "")
+        return f"Q{pk[0]}{pk[1]}" if pk else ""
+    target = [t for t, r in terakhir.items() if kode_q(r)
+              and (t not in kw or kw[t].get("at", "") < r.get("tgl", "")
+                   or (kode_q(r) not in json.dumps(kw[t]) and kw[t].get("at", "") < hari_ini))]
+    tok = get_token()
+
+    def ambil(t):
+        for coba in range(4):
+            try:
+                h = http_get_api(SB + f"/findata-view/company/financial?symbol={t}&data_type=1&report_type=1&statement_type=1", tok)
+                time.sleep(0.5)
+                return t, {**lkq_parse(json.loads(h)["data"]["html_report"]), "at": hari_ini}
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or coba == 3:
+                    print(f"[lk] kuartal {t} gagal: {e}", file=sys.stderr)
+                    return t, None
+                time.sleep(10 * (coba + 1))     # dibatasi Stockbit: tunggu lalu coba lagi
+            except Exception as e:
+                print(f"[lk] kuartal {t} gagal: {e}", file=sys.stderr)
+                return t, None
+        return t, None
+    n = 0
+    # 2 permintaan bersamaan dengan jeda; Stockbit membalas 429 bila terlalu rapat.
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for t, v in ex.map(ambil, target[:batas] if batas else target):
+            if v:
+                kw[t] = v
+                n += 1
+                if n % 50 == 0:
+                    _lkq_tulis(kw)
+    if n:
+        _lkq_tulis(kw)
+    return n
+
+
+def _lkq_tulis(kw: dict) -> None:
+    tmp = LKQ_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(kw, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(LKQ_PATH)
+
+
+LK_KUARTAL = {"3M": 1, "1Q": 1, "1H": 2, "6M": 2, "9M": 3, "FY": 4}   # periode kumulatif -> kuartal terakhirnya
+
+
+def lk_periode_kuartal(periode: str) -> tuple[int, str] | None:
+    """'9M26' -> (3, '26'); 'FY25' -> (4, '25'); selain itu None."""
+    m = re.match(r"^(3M|1Q|1H|6M|9M|FY)(\d{2})$", periode or "")
+    return (LK_KUARTAL[m.group(1)], m.group(2)) if m else None
+
+
+def lk_kuartal_fd(r: dict, fd: dict | None) -> dict | None:
+    """Laba kuartal terakhir MURNI (bukan kumulatif) dari laba rugi kuartalan: Q1 = 3M, Q2 = 1H - Q1, Q3 = 9M - (Q1+Q2),
+    Q4 = FY - (Q1+Q2+Q3). Bila kuartal itu sudah ada di tabel dipakai langsung; bila belum, dihitung dari laba kumulatif
+    ringkasan dikurangi kuartal sebelumnya, hanya bila tabel cocok dengan ringkasan (jumlah kuartal tahun lalu ~ laba
+    kumulatif tahun lalu, selisih <= 5%). Dibandingkan dengan kuartal yang sama tahun lalu (YoY) dan kuartal sebelumnya (QoQ)."""
+    pk = lk_periode_kuartal(r.get("periode") or "")
+    if not fd or not fd.get("laba") or not pk:
+        return None
+    q, yy = pk
+    py = f"{int(yy) - 1:02d}"
+    d_cum, k_cum = lk_bertanda(r)
+    # Tabel memakai mata uang laporan (label idr pada tabel tidak selalu benar); kecocokan angka menjadi penentu.
+    mata_r = ((r.get("laba") or {}).get("ke") or {}).get("mata")
+
+    def selisih(row):
+        s = [row.get(f"Q{i}{py}") for i in range(1, q + 1)]
+        if None in s or d_cum is None:
+            return None
+        # Dibagi angka terbesar (tahun lalu / tahun ini): basis tahun lalu yang sangat kecil (mis. US$0,29 juta)
+        # tidak membuat selisih kecil dianggap tidak cocok.
+        return abs(sum(s) - d_cum) / max(abs(d_cum), abs(k_cum or 0), 1)
+    # Baris laba yang paling cocok dengan laba kumulatif tahun lalu di ringkasan (pemilik entitas induk vs total).
+    cocok = sorted(((selisih(row), nama, row) for nama, row in fd["laba"].items()), key=lambda x: (x[0] is None, x[0] or 0))
+    sel, nama, row = cocok[0]
+    konsisten = sel is not None and sel <= 0.05
+    sebelumnya = [row.get(f"Q{i}{yy}") for i in range(1, q)]
+    nilai, sumber = row.get(f"Q{q}{yy}"), "laporan kuartalan"
+    if nilai is None:
+        if not (konsisten and k_cum is not None and None not in sebelumnya):
+            return None
+        nilai = k_cum - sum(sebelumnya)
+        sumber = f"{r['periode'][:2]} dikurangi " + "+".join(f"Q{i}" for i in range(1, q)) if q > 1 else "laporan 3M"
+    lalu = row.get(f"Q{q}{py}")
+    sblm = row.get(f"Q{q - 1}{yy}") if q > 1 else row.get(f"Q4{py}")
+    yoy = round((nilai / lalu - 1) * 100, 1) if lalu and lalu > 0 else None
+    qoq = round((nilai / sblm - 1) * 100, 1) if sblm and sblm > 0 else None
+    # Pendapatan kuartal: dari tabel, atau kumulatif ringkasan dikurangi kuartal sebelumnya (bila konsisten).
+    pd_, pyoy = fd.get("pend") or {}, None
+    p, pl = pd_.get(f"Q{q}{yy}"), pd_.get(f"Q{q}{py}")
+    psb = [pd_.get(f"Q{i}{yy}") for i in range(1, q)]
+    rp = r.get("pendapatan") or {}
+    if p is None and (rp.get("ke") or {}).get("v") and rp.get("pct") is not None and rp["pct"] > -100 and None not in psb:
+        # Cocokkan dulu: jumlah kuartal tahun lalu di tabel ~ pendapatan kumulatif tahun lalu (tersirat dari % YoY ringkasan).
+        kum_lalu = rp["ke"]["v"] / (1 + rp["pct"] / 100)
+        tabel_lalu = [pd_.get(f"Q{i}{py}") for i in range(1, q + 1)]
+        if None not in tabel_lalu and abs(sum(tabel_lalu) - kum_lalu) <= 0.05 * max(kum_lalu, rp["ke"]["v"]):
+            p = rp["ke"]["v"] - sum(psb)
+    if p is not None and pl and pl > 0:
+        pyoy = round((p / pl - 1) * 100, 1)
+    status = ("rugi" if nilai <= 0 else "berbalik" if lalu is not None and lalu <= 0 else
+              "naik" if yoy is not None and yoy >= 0 else "turun" if yoy is not None else "")
+    # Laba 12 bulan terakhir (TTM) = kuartal ini + 3 kuartal sebelumnya; run-rate = kuartal ini x 4.
+    # Potensi = run-rate / TTM - 1: kenaikan harga setara bila valuasi (PE) tetap dan laba bertahan di level kuartal ini.
+    lalu3, (qq, yr) = [], (q, int(yy))
+    for _ in range(3):
+        qq, yr = (qq - 1, yr) if qq > 1 else (4, yr - 1)
+        lalu3.append(row.get(f"Q{qq}{yr % 100:02d}"))
+    ttm = nilai + sum(lalu3) if None not in lalu3 else None
+    potensi = round((nilai * 4 / ttm - 1) * 100, 1) if ttm and ttm > 0 and nilai > 0 else None
+    return {"q": q, "laba": nilai, "labaLalu": lalu, "yoy": yoy, "labaSebelum": sblm, "qoq": qoq, "pendYoy": pyoy,
+            "ttm": ttm, "potensi": potensi,
+            "mata": mata_r if konsisten else fd.get("mata"), "status": status, "sumber": sumber, "baris": nama,
+            "melemah": r.get("kategori") in ("bagus", "naik", "berbalik") and status in ("turun", "rugi")}
+
+
+# Key Stats Stockbit (/keystats/ratio/v1): laba, EPS, dan pendapatan PER KUARTAL (termasuk kuartal terbaru),
+# pertumbuhan kuartal YoY resmi, serta valuasi (PE TTM/annualised, median PE IHSG, PBV). Sumber utama kuartal murni;
+# tabel findata menjadi cadangan. Disimpan ringkas di .lk-keystats.json.
+LKS_PATH = ROOT / ".lk-keystats.json"
+_LKS_UNIT = {"T": 1e12, "B": 1e9, "M": 1e6, "K": 1e3}
+
+
+def _lks_angka(s) -> float | None:
+    """'45 B' -> 45e9; '(9 B)' -> -9e9; '1,016 B' -> 1016e9; '72.70' -> 72.7; '309%' -> 309; '-' -> None."""
+    t = str(s or "").strip().replace(",", "")
+    neg = t.startswith("(") and t.endswith(")")
+    t = t.strip("()").replace("%", "").strip()
+    m = re.match(r"^(-?[\d.]+)\s*([TBMK])?$", t)
+    if not m:
+        return None
+    v = float(m.group(1)) * _LKS_UNIT.get(m.group(2) or "", 1)
+    return -v if neg else v
+
+
+# Rasio tambahan untuk screening KakdrWay (nama item Key Stats Stockbit; dicocokkan longgar).
+KS_KAKDR_RX = re.compile(r"debt to equity|return on equity|dividend|52 week (high|low)|book value per share|payout", re.I)
+LKS_VERSI = 2   # Key Stats lama (tanpa rasio KakdrWay) diambil ulang
+
+
+def lks_parse(k: dict) -> dict:
+    """JSON keystats -> {"kuartal": {"Net Income"|"EPS"|"Revenue": {"Q326": nilai}}, "terbaru": "Q326", "rasio": {...}, "mata"}."""
+    out, terbaru = {}, ""
+    for g in (k.get("financial_year_parent") or {}).get("financial_year_groups") or []:
+        nama = g.get("fitem_name")
+        mr = g.get("most_recent_quarter") or {}
+        vals = {}
+        for y in g.get("financial_year_values") or []:
+            for pv in y.get("period_values") or []:
+                v = _lks_angka(pv.get("quarter_value"))
+                if v is not None and pv.get("period") and pv.get("year"):
+                    vals[f"{pv['period']}{str(pv['year'])[-2:]}"] = v
+        out[nama] = vals
+        if mr.get("quarter") and mr.get("date"):
+            terbaru = f"{mr['quarter']}{mr['date'][-2:]}"
+    rasio = {}
+    for grp in k.get("closure_fin_items_results") or []:
+        for f in grp.get("fin_name_results") or []:
+            fi = f.get("fitem") or {}
+            if fi.get("name") in ("Current PE Ratio (TTM)", "Current PE Ratio (Annualised)", "IHSG PE Ratio TTM (Median)",
+                                  "Current Price to Book Value", "Current EPS (TTM)", "Current EPS (Annualised)",
+                                  "Net Income (Quarter YoY Growth)", "Revenue (Quarter YoY Growth)", "Net Profit Margin (Quarter)") \
+                    or KS_KAKDR_RX.search(str(fi.get("name") or "")):
+                rasio[fi["name"]] = _lks_angka(fi.get("value"))
+    cur = k.get("financial_report_currency") or []
+    st = k.get("stats") or {}
+    mcap, saham = _lks_angka(st.get("market_cap")), _lks_angka(st.get("current_share_outstanding"))
+    # Grup financial_year_groups selalu dalam Rupiah (versi USD ada di financial_year_groups_usd).
+    return {"v": LKS_VERSI, "kuartal": out, "terbaru": terbaru, "rasio": rasio, "mata": "Rp", "mataLaporan": "USD" if "USD" in cur else "Rp",
+            "mcap": mcap, "saham": saham, "freeFloat": _lks_angka(st.get("free_float")),
+            "hargaKira": round(mcap / saham, 1) if mcap and saham else None}
+
+
+def lks_load() -> dict:
+    try:
+        return json.loads(LKS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def sync_lk_keystats(batas: int | None = None, target: list[str] | None = None) -> int:
+    """Ambil Key Stats untuk emiten yang laporan terakhirnya 3M/1H/9M/FY dan belum mutakhir (sama aturan dengan findata),
+    atau untuk daftar `target` tertentu (mis. universe Saham 50)."""
+    if not (get_token() and not token_expired()):
+        return 0
+    data, ks = lk_load(), lks_load()
+    terakhir = {}
+    for r in sorted(data.values(), key=lambda r: r.get("tgl", "")):
+        terakhir[r["t"]] = r
+    hari_ini = datetime.now().strftime("%Y-%m-%d")
+
+    def kode_q(r):
+        pk = lk_periode_kuartal(r.get("periode") or "")
+        return f"Q{pk[0]}{pk[1]}" if pk else ""
+    if target is None:
+        target = [t for t, r in terakhir.items() if kode_q(r)
+                  and (t not in ks or ks[t].get("at", "") < r.get("tgl", "")
+                       or (ks[t].get("terbaru") != kode_q(r) and ks[t].get("at", "") < hari_ini))]
+    tok = get_token()
+
+    def ambil(t):
+        for coba in range(4):
+            try:
+                j = json.loads(http_get_api(SB + f"/keystats/ratio/v1/{t}?year_limit=3", tok))
+                time.sleep(0.5)
+                return t, {**lks_parse(j.get("data") or {}), "at": hari_ini}
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or coba == 3:
+                    print(f"[lk] keystats {t} gagal: {e}", file=sys.stderr)
+                    return t, None
+                time.sleep(10 * (coba + 1))
+            except Exception as e:
+                print(f"[lk] keystats {t} gagal: {e}", file=sys.stderr)
+                return t, None
+        return t, None
+    n = 0
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for t, v in ex.map(ambil, target[:batas] if batas else target):
+            if v:
+                ks[t] = v
+                n += 1
+                if n % 50 == 0:
+                    _lks_tulis(ks)
+    if n:
+        _lks_tulis(ks)
+    return n
+
+
+def _lks_tulis(ks: dict) -> None:
+    tmp = LKS_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(ks, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(LKS_PATH)
+
+
+def lk_kuartal_ks(r: dict, ks: dict | None) -> dict | None:
+    """Kuartal murni dari Key Stats: laba kuartal (dibulatkan Stockbit), pertumbuhan YoY resmi, QoQ dan potensi dari EPS
+    (presisi 2 desimal), pendapatan YoY resmi. Hanya bila kuartal terbaru Key Stats = kuartal laporan ringkasan."""
+    pk = lk_periode_kuartal(r.get("periode") or "")
+    if not ks or not pk:
+        return None
+    q, yy = pk
+    kode = f"Q{q}{yy}"
+    if ks.get("terbaru") != kode:
+        return None
+    ni, eps = (ks.get("kuartal") or {}).get("Net Income") or {}, (ks.get("kuartal") or {}).get("EPS") or {}
+    py = f"{int(yy) - 1:02d}"
+    sb = f"Q{q - 1}{yy}" if q > 1 else f"Q4{py}"
+    e, el, es = eps.get(kode), eps.get(f"Q{q}{py}"), eps.get(sb)
+    laba = ni.get(kode)
+    if laba is None and e is None:
+        return None
+    rs = ks.get("rasio") or {}
+    yoy = rs.get("Net Income (Quarter YoY Growth)")
+    if yoy is None and e is not None and el and el > 0:
+        yoy = round((e / el - 1) * 100, 1)
+    pakai_eps = e is not None and not (e == 0 and laba)
+    nilai = e if pakai_eps else laba
+    lalu = el if pakai_eps else ni.get(f"Q{q}{py}")
+    sblm = es if pakai_eps else ni.get(sb)
+    qoq = round((nilai / sblm - 1) * 100, 1) if sblm and sblm > 0 and nilai is not None else None
+    # TTM dan run-rate dari EPS: kuartal ini + 3 kuartal sebelumnya.
+    lalu3, (qq, yr) = [], (q, int(yy))
+    for _ in range(3):
+        qq, yr = (qq - 1, yr) if qq > 1 else (4, yr - 1)
+        lalu3.append((eps if pakai_eps else ni).get(f"Q{qq}{yr % 100:02d}"))
+    ttm = nilai + sum(lalu3) if nilai is not None and None not in lalu3 else None
+    potensi = round((nilai * 4 / ttm - 1) * 100, 1) if ttm and ttm > 0 and nilai and nilai > 0 else None
+    status = ("rugi" if nilai is not None and nilai <= 0 else "berbalik" if lalu is not None and lalu <= 0 else
+              "naik" if yoy is not None and yoy >= 0 else "turun" if yoy is not None else "")
+    return {"q": q, "laba": laba, "labaLalu": ni.get(f"Q{q}{py}"), "yoy": yoy, "labaSebelum": ni.get(sb), "qoq": qoq,
+            "pendYoy": rs.get("Revenue (Quarter YoY Growth)"), "ttm": ttm, "potensi": potensi, "mata": ks.get("mata"),
+            "status": status, "sumber": "Key Stats Stockbit", "baris": "Net Income",
+            "pe": rs.get("Current PE Ratio (TTM)"), "peAnn": rs.get("Current PE Ratio (Annualised)"),
+            "peMedian": rs.get("IHSG PE Ratio TTM (Median)"), "pbv": rs.get("Current Price to Book Value"),
+            "npm": rs.get("Net Profit Margin (Quarter)"),
+            "melemah": r.get("kategori") in ("bagus", "naik", "berbalik") and status in ("turun", "rugi")}
+
+
+_lk_memo: tuple[tuple, float, dict] = ((), 0.0, {})
+
+
+def lk_tumbuh(kw: dict | None) -> dict | None:
+    """Definisi tunggal "kuartal naik" untuk semua rekomendasi: laba kuartal murni positif, lebih besar dari kuartal
+    yang sama tahun lalu (naik/berbalik YoY) DAN dari kuartal sebelumnya. QoQ % tidak terdefinisi bila kuartal
+    sebelumnya rugi; saat itu laba kini > rugi kuartal lalu = naik (berbalik QoQ)."""
+    if not kw:
+        return kw
+    laba, sblm, qoq = kw.get("laba"), kw.get("labaSebelum"), kw.get("qoq")
+    naik_qoq = qoq > 0 if qoq is not None else (laba > sblm if laba is not None and sblm is not None else None)
+    kw["naikQoq"] = naik_qoq
+    kw["berbalikQoq"] = qoq is None and sblm is not None and sblm < 0 and (laba or 0) > 0
+    kw["tumbuh"] = kw.get("status") in ("naik", "berbalik") and bool(naik_qoq)
+    return kw
+
+
+# Klasifikasi emiten (sektor/subsektor/industri IDX-IC dari profil Stockbit) untuk kartu "terbaik per kelompok" di
+# Kinerja: jarang berubah, diambil bertahap di latar dan disimpan ke .sektor.json.
+SEKTOR_PATH = ROOT / ".sektor.json"
+
+
+def sektor_load() -> dict:
+    try:
+        return json.loads(SEKTOR_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+PROFIL_IDX_PATH = ROOT / ".profil-indeks.json"
+_pidx: dict | None = None
+_pidx_lock = threading.Lock()
+_pidx_tulis = [0.0]
+
+
+def profil_ringkas(p: dict) -> dict:
+    """Profil Stockbit -> ringkas untuk indeks lintas emiten (jejak pengurus, alamat sama, nominee, tren pemegang)."""
+    ke = p.get("key_executive") or {}
+    pengurus = list(dict.fromkeys(str(x.get("value") or "").strip() for v in ke.values() if isinstance(v, list)
+                                  for x in v if isinstance(x, dict) and str(x.get("value") or "").strip()))
+    adr = (p.get("address") or [{}])[0] or {}
+    pem = [[str(s.get("name") or "").strip(), to_num(str(s.get("percentage") or "").rstrip("%")) or 0.0,
+            str(s.get("domicile") or ""), str(s.get("classification") or "")]
+           for s in ((p.get("shareholder_one_percent") or {}).get("shareholder") or [])[:15] if s.get("name")]
+    jml = []
+    for x in p.get("shareholder_numbers") or []:
+        try:
+            d = datetime.strptime(str(x.get("shareholder_date") or ""), "%d %b %Y").strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+        n = to_num(str(x.get("total_share") or "").replace(",", ""))
+        if n:
+            jml.append([d, n])
+    return {"at": datetime.now().strftime("%Y-%m-%d"), "pengurus": pengurus[:20],
+            "alamat": re.sub(r"\s+", " ", str(adr.get("office") or adr.get("value") or ""))[:220], "telp": str(adr.get("phone") or "")[:40],
+            "pemegang": pem, "jumlah": jml[:24]}
+
+
+def profil_indeks() -> dict:
+    """Indeks profil per kode (.profil-indeks.json); saat pertama dimuat diisi juga dari profil di cache HTTP."""
+    global _pidx
+    with _pidx_lock:
+        if _pidx is None:
+            try:
+                _pidx = json.loads(PROFIL_IDX_PATH.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                _pidx = {}
+            con = db()
+            if con:
+                with _db_lock:
+                    rows = con.execute("SELECT url, body FROM http_cache WHERE url LIKE '%/emitten/%/profile'").fetchall()
+                for url, body in rows:
+                    m = re.search(r"/emitten/([A-Z0-9]+)/profile$", url)
+                    if m and m.group(1) not in _pidx:
+                        try:
+                            _pidx[m.group(1)] = profil_ringkas(json.loads(body).get("data") or {})
+                        except (ValueError, AttributeError):
+                            pass
+        return _pidx
+
+
+def profil_indeks_isi(t: str, p: dict, simpan: bool = True) -> None:
+    if not p:
+        return
+    idx = profil_indeks()
+    with _pidx_lock:
+        idx[t] = profil_ringkas(p)
+        if simpan and time.time() - _pidx_tulis[0] > 60:
+            _pidx_tulis[0] = time.time()
+            tmp = PROFIL_IDX_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(PROFIL_IDX_PATH)
+
+
+def sync_profil_indeks(batas: int = 150) -> int:
+    """Lengkapi indeks profil seluruh BEI (yang belum ada atau > 30 hari), maks. `batas` emiten per putaran."""
+    if not (get_token() and not token_expired()):
+        return 0
+    idx = profil_indeks()
+    lama = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    target = [t for t in bei_kode_load() if t not in idx or idx[t].get("at", "") < lama][:batas]
+    tok, n = get_token(), 0
+    for t in target:
+        try:
+            p = json.loads(http_get_api(SB + f"/emitten/{t}/profile", tok)).get("data") or {}
+            profil_indeks_isi(t, p, simpan=False)
+            n += 1
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                time.sleep(30)
+        except Exception:
+            pass
+        time.sleep(0.8)
+    if n:
+        with _pidx_lock:
+            tmp = PROFIL_IDX_PATH.with_suffix(".tmp")
+            tmp.write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(PROFIL_IDX_PATH)
+    return n
+
+
+def sync_sektor(batas: int = 300) -> int:
+    """Ambil klasifikasi untuk emiten di daftar LK yang belum punya (maks. `batas` per putaran)."""
+    if not (get_token() and not token_expired()):
+        return 0
+    sk = sektor_load()
+    target = sorted({r["t"] for r in lk_load().values()} - set(sk))[:batas]
+    tok = get_token()
+
+    def ambil(t):
+        for coba in range(4):
+            try:
+                c = (json.loads(http_get_api(SB + f"/emitten/{t}/profile", tok)).get("data") or {}).get("classification") or {}
+                time.sleep(0.5)
+                return t, {k: (c.get(f) or {}).get("name", "") for k, f in (("sektor", "sector"), ("sub", "sub_sector"), ("ind", "industry"))}
+            except urllib.error.HTTPError as e:
+                if e.code != 429 or coba == 3:
+                    return t, None
+                time.sleep(10 * (coba + 1))
+            except Exception:
+                return t, None
+        return t, None
+    n = 0
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        for t, v in ex.map(ambil, target):
+            if v:
+                sk[t] = v
+                n += 1
+    if n:
+        tmp = SEKTOR_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(sk, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(SEKTOR_PATH)
+    return n
+
+
+def lk_api_cache() -> dict:
+    """lk_api dengan cache: dihitung ulang bila berkas LK / kuartalan / Key Stats berubah atau setelah 5 menit
+    (harga & daftar radar), agar tab Kinerja tidak menghitung ulang ratusan laporan di setiap kunjungan."""
+    global _lk_memo
+    kunci = tuple(p.stat().st_mtime if p.exists() else 0 for p in (LK_PATH, LKQ_PATH, LKS_PATH, SEKTOR_PATH))
+    if _lk_memo[0] == kunci and time.time() - _lk_memo[1] < 300:
+        return _lk_memo[2]
+    hasil = lk_api()
+    _lk_memo = (kunci, time.time(), hasil)
+    return hasil
+
+
+def lk_api(data: dict | None = None, kuartalan: dict | None = None, keystats: dict | None = None, sektor: dict | None = None) -> dict:
+    """Daftar LK terbaru per emiten (satu laporan terakhir per kode) + ringkasan per kategori."""
+    data = lk_load() if data is None else data
+    sektor = sektor_load() if sektor is None else sektor
+    # Cadangan sektor dari indeks sektoral data Seasonality bila profil belum diambil.
+    ix = {t: SZ.SECTORS.get((v.get("ix") or [""])[0], "") for t, v in (season_data().get("stock") or {}).items()}
+    kuartalan = lkq_load() if kuartalan is None else kuartalan
+    keystats = lks_load() if keystats is None else keystats
+    terakhir, per_periode = {}, {}
+    for r in sorted(data.values(), key=lambda r: (r.get("tgl", ""), r["id"])):
+        terakhir[r["t"]] = r
+        per_periode.setdefault(r["t"], {})[r.get("periode") or ""] = r
+    items = items_all()
+    radar = {it["ticker"] for it in items}
+    # Backdoor terkonfirmasi: sudah lewat tahap penyaringan (PPJB/PTW/dst.) dan ditandai terkonfirmasi.
+    backdoor = {it["ticker"] for it in items if it.get("confirmed") and it.get("stage") not in (None, "", "radar")}
+    rows = []
+    for r in terakhir.values():
+        # Kuartal terakhir murni (Q1/Q2/Q3/Q4) dari laba rugi kuartalan Stockbit; cadangan khusus 9M: ringkasan 9M - 1H.
+        kw = lk_kuartal_ks(r, keystats.get(r["t"])) or lk_kuartal_fd(r, kuartalan.get(r["t"]))
+        m = re.match(r"^9M(\d{2})$", r.get("periode") or "")
+        if kw is None and m:
+            pp = per_periode[r["t"]]
+            kw = lk_kuartal(r, pp.get(f"1H{m.group(1)}") or pp.get(f"6M{m.group(1)}"), pp.get(f"3M{m.group(1)}") or pp.get(f"1Q{m.group(1)}"))
+        rows.append({**r, "radar": r["t"] in radar, "backdoor": r["t"] in backdoor, "kuartal": lk_tumbuh(kw),
+                     "kelas": sektor.get(r["t"]) or ({"sektor": ix[r["t"]]} if ix.get(r["t"]) else None)})
+    rows.sort(key=lambda r: (r.get("tgl", ""), (r.get("laba") or {}).get("pct") or 0), reverse=True)
+    hit = {}
+    for r in rows:
+        hit[r["kategori"]] = hit.get(r["kategori"], 0) + 1
+    periode = {}
+    for r in rows:
+        if r.get("periode"):
+            periode[r["periode"]] = periode.get(r["periode"], 0) + 1
+    return {"updated": max((r.get("tgl", "") for r in rows), default=""), "n": len(rows), "hitung": hit,
+            "periode": max(periode, key=periode.get) if periode else "", "rows": rows}
+
+
+def lk_loop() -> None:
+    """Sinkron LK tiap 30 menit pada jam aktif (06.00-22.00 WIB)."""
+    time.sleep(120)
+    while True:
+        jam = datetime.now(timezone(timedelta(hours=7))).hour
+        if 6 <= jam < 22 or not LK_PATH.exists():
+            try:
+                n = sync_lk()
+                if n:
+                    print(f"[lk] {n} laporan keuangan baru", file=sys.stderr)
+                n = sync_lk_keystats()
+                if n:
+                    print(f"[lk] Key Stats diperbarui untuk {n} emiten", file=sys.stderr)
+                n = sync_lk_kuartal()
+                if n:
+                    print(f"[lk] laba rugi kuartalan diperbarui untuk {n} emiten", file=sys.stderr)
+                n = sync_sektor()
+                if n:
+                    print(f"[lk] klasifikasi sektor untuk {n} emiten", file=sys.stderr)
+                n = sync_profil_indeks()
+                if n:
+                    print(f"[lk] indeks profil (pengurus/alamat/pemegang) untuk {n} emiten", file=sys.stderr)
+            except Exception as e:
+                print(f"[lk] gagal: {e}", file=sys.stderr)
+        time.sleep(1800)
+
+
+# ------------------------------------------------------------- Saham 50 ----
+# Saham berharga <= Rp50 di seluruh BEI dan analisa potensinya: radar backdoor & calon cangkang, aksi korporasi
+# (keterbukaan 180 hari), kinerja laporan keuangan & kuartal murni, valuasi (PBV/PE Key Stats), dan teknikal harga.
+# Universe: Key Stats (kapitalisasi / jumlah saham) + data harga Recovery + radar; harga pasti dari grafik Stockbit.
+# Dibangun di latar (harian) ke .saham50.json; /api/saham50 membaca berkas itu.
+S50_PATH = ROOT / ".saham50.json"
+# Naikkan bila cara penyusunan berubah: daftar tersimpan versi lama disusun ulang otomatis setelah deploy.
+S50_VERSI = 2
+# Riwayat skor harian Saham 50 ({tanggal: {kode: skor}}, 60 hari) untuk perubahan skor dibanding minggu lalu.
+S50_RIWAYAT_PATH = ROOT / ".saham50-riwayat.json"
+S50_BATAS = 50
+RUTIN_LK_RX = re.compile(r"registrasi pemegang|bukti iklan|laporan bulanan|penggunaan dana hasil|pemanggilan rapat|jadwal", re.I)
+
+
+def _json_berkas(nama: str) -> dict:
+    try:
+        return json.loads((ROOT / nama).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+S50_AKSI = {"akuisisi": "Perubahan pengendali / akuisisi", "rights": "Penambahan modal (HMETD / private placement / inbreng)",
+            "kbli": "Perubahan kegiatan usaha / nama", "direksi": "Perubahan pengurus", "uma": "UMA / suspensi bursa"}
+
+
+def _ema(vals: list[float], n: int) -> float | None:
+    if len(vals) < n:
+        return None
+    k, e = 2 / (n + 1), sum(vals[:n]) / n
+    for v in vals[n:]:
+        e = v * k + e * (1 - k)
+    return e
+
+
+def _rsi(vals: list[float], n: int = 14) -> float | None:
+    if len(vals) <= n:
+        return None
+    naik = turun = 0.0
+    for a, b in zip(vals[-n - 1:-1], vals[-n:]):
+        naik += max(b - a, 0)
+        turun += max(a - b, 0)
+    return 100.0 if turun == 0 else round(100 - 100 / (1 + naik / turun), 1)
+
+
+def s50_teknikal(px: list[dict]) -> dict | None:
+    """Harga penutupan harian -> harga, kinerja 1W/1M/3M/YTD, jarak dari tertinggi/terendah 52 minggu, EMA20, RSI,
+    dan resistance terdekat (tertinggi 60 hari) sebagai target teknikal."""
+    c = [p["v"] for p in px if p.get("v")]
+    if len(c) < 30:
+        return None
+    h = c[-1]
+    ret = lambda n: round((h / c[-1 - n] - 1) * 100, 1) if len(c) > n and c[-1 - n] else None
+    th = str(px[-1]["d"])[:4]
+    awal = next((p["v"] for p in px if str(p["d"])[:4] == th), None)
+    y = c[-250:]
+    e20 = _ema(c[-120:], 20)
+    res = max(c[-60:])
+    return {"harga": h, "tgl": str(px[-1]["d"])[:10], "ret": {"1W": ret(5), "1M": ret(21), "3M": ret(63),
+            "YTD": round((h / awal - 1) * 100, 1) if awal else None},
+            "tinggi52": max(y), "rendah52": min(y), "dariTinggi": round((h / max(y) - 1) * 100, 1),
+            "dariRendah": round((h / min(y) - 1) * 100, 1), "ema20": round(e20, 1) if e20 else None,
+            "diAtasEma20": bool(e20 and h > e20), "rsi": _rsi(c), "resistance": res,
+            "potensiTeknikal": round((res / h - 1) * 100, 1) if res > h else 0.0,
+            "datar": len(set(c[-20:])) <= 2}
+
+
+def s50_kandidat_universe(ks: dict) -> set[str]:
+    """Kode yang perkiraan harganya (Key Stats: kapitalisasi / jumlah saham) <= 1,3 x batas, ditambah data harga dan radar.
+    Seluruh kode BEI (.bei-kode.json) yang belum punya Key Stats atau Key Stats-nya lebih dari 7 hari diambil dulu
+    (perkiraan harga ikut mutakhir mingguan)."""
+    seminggu = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    kurang = [t for t in bei_kode_load() if t not in ks or ks[t].get("at", "") < seminggu or ks[t].get("v") != LKS_VERSI]
+    if kurang:
+        sync_lk_keystats(target=kurang)
+        ks.update(lks_load())
+    out = {t for t, v in ks.items() if v.get("hargaKira") and v["hargaKira"] <= S50_BATAS * 1.3}
+    try:
+        out |= {t for t, v in harga_semua().items() if v.get("h") and v["h"] <= S50_BATAS}
+    except Exception:
+        pass
+    out |= {it["ticker"] for it in items_all() if (to_num(it.get("price")) or 9e9) <= S50_BATAS * 1.3 and TICKER_RE.match(it["ticker"])}
+    return out
+
+
+def s50_broker(syms: set[str]) -> dict:
+    """Pola broker 2 bulan terakhir (data Pola Broker bulanan) untuk saham Saham 50: net bandar (3 pembeli + 3 penjual
+    teratas), broker akumulasi dan distribusi utama. Hanya saham yang tercatat di 25 teratas transaksi broker."""
+    d = broker_data()
+    bulan = sorted(BP.view(d, None, None, "").get("bulanAda") or [])[-2:] if d else []
+    out: dict[str, list] = {}
+    for m in bulan:
+        s = BP.view(d, m, None, "", batas=None).get("saham") or {}
+        for side in ("akumulasi", "distribusi"):
+            for a in s.get(side) or []:
+                if a["s"] in syms:
+                    out.setdefault(a["s"], []).append({"bulan": m, "tahun": d.get("tahun"), "bandar": a["bandar"],
+                                                       "akum": [z["b"] for z in a["akum"]], "dist": [z["b"] for z in a["dist"]]})
+    return out
+
+
+def s50_broker_parse(resp: dict) -> dict | None:
+    """Ringkasan broker satu saham (marketdetectors, 30 hari): net 3 pembeli + 3 penjual teratas dan kodenya."""
+    bs = ((resp or {}).get("data") or {}).get("broker_summary") or {}
+
+    def nilai(x, kunci):
+        # Angka mentah Stockbit (bisa notasi ilmiah, mis. "1.5e+09"): float() seperti nego_month di brokerpola.
+        for k in kunci:
+            try:
+                return abs(float(x[k]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return 0.0
+    beli = sorted(((x.get("netbs_broker_code"), nilai(x, ("bval", "value", "netbs_value"))) for x in bs.get("brokers_buy") or []
+                   if x.get("netbs_broker_code")), key=lambda z: -z[1])[:3]
+    jual = sorted(((x.get("netbs_broker_code"), nilai(x, ("sval", "value", "netbs_value"))) for x in bs.get("brokers_sell") or []
+                   if x.get("netbs_broker_code")), key=lambda z: -z[1])[:3]
+    if not beli and not jual:
+        return None
+    return {"bandar": round(sum(v for _, v in beli) - sum(v for _, v in jual)), "akum": [c for c, _ in beli], "dist": [c for c, _ in jual]}
+
+
+def s50_riwayat(rows: list[dict], hari_ini: date) -> None:
+    """Simpan skor hari ini ke riwayat dan isi skorLalu/skorTgl dari catatan >= 7 hari lalu (yang terdekat)."""
+    try:
+        rw = json.loads(S50_RIWAYAT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        rw = {}
+    kini = hari_ini.isoformat()
+    batas7 = (hari_ini - timedelta(days=7)).isoformat()
+    lalu = max((d for d in rw if d <= batas7), default=None) or min((d for d in rw if d < kini), default=None)
+    for x in rows:
+        if lalu and x["t"] in rw[lalu]:
+            x["skorLalu"], x["skorTgl"] = rw[lalu][x["t"]], lalu
+    rw[kini] = {x["t"]: x["skor"] for x in rows}
+    rw = {d: v for d, v in rw.items() if d >= (hari_ini - timedelta(days=60)).isoformat()}
+    tmp = S50_RIWAYAT_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rw, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(S50_RIWAYAT_PATH)
+
+
+_kakdr_memo: tuple = (0.0, None)
+KAKDR_RIWAYAT_PATH = ROOT / ".kakdr-riwayat.json"
+
+
+def kakdr_riwayat(kode: list[str]) -> tuple[list[str], list[str]]:
+    """Simpan daftar lolos hari ini; kembalikan (baru masuk, keluar) dibanding hari sebelumnya yang tercatat."""
+    try:
+        r = json.loads(KAKDR_RIWAYAT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        r = {}
+    hari = datetime.now().strftime("%Y-%m-%d")
+    r[hari] = kode
+    r = dict(sorted(r.items())[-14:])
+    try:
+        KAKDR_RIWAYAT_PATH.write_text(json.dumps(r), encoding="utf-8")
+    except OSError:
+        pass
+    lalu = [d for d in r if d < hari]
+    if not lalu:
+        return [], []
+    sebelum = set(r[lalu[-1]])
+    return [k for k in kode if k not in sebelum], sorted(sebelum - set(kode))
+
+
+def kakdr_screen() -> dict:
+    """Screening KakdrWay (kakdr.com) atas Key Stats seluruh emiten BEI:
+    A pisau jatuh (harga >= 50% di bawah tertinggi 52 minggu), B1 PBV < 1 (atau dividend yield >= 2x PBV),
+    B2 DER < 1 (atau ROE >= 10x DER; tidak berlaku bank/asuransi), B3 ROE positif, C dividen. Skor 0-10 (aman > 6,5)."""
+    global _kakdr_memo
+    if _kakdr_memo[1] and time.time() - _kakdr_memo[0] < 3600:
+        return _kakdr_memo[1]
+    ks = lks_load()
+    try:
+        harga = harga_semua()
+    except Exception:
+        harga = {}
+    sk = sektor_load()
+    nama = nama_semua()
+
+    def ambil(rs, *pola):
+        for p in pola:
+            for k, v in rs.items():
+                if v is not None and re.search(p, k, re.I):
+                    return v
+        return None
+    rows, ada_data = [], 0
+    for t, k in ks.items():
+        rs = k.get("rasio") or {}
+        der = ambil(rs, r"debt to equity")
+        roe = ambil(rs, r"return on equity.*ttm", r"return on equity")
+        dy = ambil(rs, r"dividend yield")
+        tinggi = ambil(rs, r"52 week high")
+        pbv = rs.get("Current Price to Book Value")
+        if der is None and roe is None and dy is None:
+            continue
+        ada_data += 1
+        h = (harga.get(t) or {}).get("h") or k.get("hargaKira")
+        turun = round((1 - h / tinggi) * 100, 1) if h and tinggi else None
+        finansial = re.search(r"bank|asuransi|insurance", " ".join(str(v) for v in (sk.get(t) or {}).values()), re.I)
+        a = turun is not None and turun >= 50
+        b1 = pbv is not None and 0 < pbv < 1 or (pbv is not None and dy is not None and dy >= 2 * pbv)
+        b2 = bool(finansial) or (der is not None and 0 <= der < 1) or (der is not None and roe is not None and roe >= 10 * der)
+        b3 = roe is not None and roe > 0
+        c = dy is not None and dy > 0
+        skor = round(2 * a + 2.5 * b1 + 2 * b2 + 1.5 * b3 + 2 * c, 1)
+        rows.append({"t": t, "nama": nama.get(t, ""), "skor": skor, "harga": h, "turun": turun, "pbv": pbv, "der": der, "roe": roe, "dy": dy,
+                     "lolos": {"A": a, "B1": b1, "B2": b2, "B3": b3, "C": c}})
+    rows.sort(key=lambda r: (-r["skor"], -(r["turun"] or 0)))
+    lolos = [r for r in rows if r["skor"] > 6.5][:80]
+    radar = radar_tickers()
+    for r in lolos:
+        r["radar"] = r["t"] in radar
+        r["backdoor"] = (((pd_baca(r["t"]) or {}).get("hasil") or {}).get("backdoor") or {}).get("skor")
+    baru, keluar = kakdr_riwayat([r["t"] for r in lolos]) if ada_data >= 300 else ([], [])
+    for r in lolos:
+        r["baru"] = r["t"] in baru
+    hasil = {"updated": datetime.now().strftime("%Y-%m-%d %H:%M"), "dinilai": ada_data,
+             "rows": lolos, "keluar": [{"t": x, "nama": nama.get(x, "")} for x in keluar],
+             "catatan": "" if ada_data else "Data rasio KakdrWay (DER, ROE, dividen) sedang diambil server dari Key Stats; muat ulang beberapa jam lagi."}
+    _kakdr_memo = (time.time(), hasil)
+    return hasil
+
+
+_ah_memo: tuple = (0.0, None)
+_ah_isi = threading.Lock()
+_ah_belum: list = []                                # kode yang status perdagangannya belum dicek (hitungan terakhir)
+
+
+def ah_mulai_isi() -> bool:
+    """Mulai melengkapi status di latar bila masih ada yang belum dicek. Hanya untuk permintaan bukan publik dengan token
+    berlaku; juga saat hasil diambil dari memo, supaya permintaan internal tidak menunggu memo kedaluwarsa."""
+    if _ah_belum and not _ah_isi.locked() and not is_public_request() and get_token() and not token_expired():
+        threading.Thread(target=ah_isi_status, args=(list(_ah_belum),), daemon=True).start()
+        return True
+    return False
+
+
+def ah_status(t: str) -> dict:
+    """Status perdagangan dari cache info emiten Stockbit: suspensi, notasi khusus, UMA. Tanpa memanggil Stockbit."""
+    url = SB + f"/emitten/{t}/info"
+    body = cache_read(url, int(time.time()) - 86400)
+    segar = body is not None                       # status > 1 hari dianggap belum dicek (dilengkapi ulang di latar)
+    try:
+        d = json.loads(body or cache_read(url, 0) or "{}").get("data") or {}
+    except ValueError:
+        d = {}
+    if not d:
+        return {"dicek": False}
+    return {"dicek": segar, "suspen": d.get("status") == "STATUS_SUSPENDED" or d.get("tradeable") == 0,
+            "notasi": [{"k": n.get("notation_code"), "ket": n.get("notation_desc")} for n in d.get("notation") or [] if n.get("notation_code")],
+            "uma": bool(d.get("uma"))}
+
+
+def ah_harga_info(t: str) -> float | None:
+    """Harga terakhir dari cache info emiten Stockbit (tanpa memanggil Stockbit)."""
+    try:
+        return float((json.loads(cache_read(SB + f"/emitten/{t}/info", 0) or "{}").get("data") or {}).get("price") or 0) or None
+    except (ValueError, TypeError):
+        return None
+
+
+def ah_isi_status(kode: list[str]) -> None:
+    """Latar: ambil info emiten yang statusnya belum ada di cache (maks. 120), lalu hitung ulang analisa AH."""
+    global _ah_memo
+    if not _ah_isi.acquire(blocking=False):
+        return
+    try:
+        for t in kode[:120]:
+            try:
+                sb_fetch(f"/emitten/{t}/info")
+            except Exception:
+                pass
+            time.sleep(0.4)
+        _ah_memo = (0.0, None)
+    finally:
+        _ah_isi.release()
+
+
+def ah_screen() -> dict:
+    """Analisa AH (POV): portofolio Andry Hakim dari indeks profil KSEI >=1% + kurasi pov-ah.json, dan screening saham
+    beredar sedikit / publik kecil seluruh BEI (povah.py) tanpa saham yang sedang disuspensi. Data lokal dan cache saja;
+    status yang belum ada di cache dilengkapi di latar (bukan permintaan publik, token berlaku)."""
+    global _ah_memo, _ah_belum
+    if _ah_memo[1] and time.time() - _ah_memo[0] < 3600:
+        ah_mulai_isi()
+        return _ah_memo[1]
+    try:
+        harga = dict(harga_semua())
+    except Exception:
+        harga = {}
+    ks = lks_load()
+    for t, k in ks.items():  # Key Stats tanpa jumlah saham: harga dari cache info emiten supaya saham beredar bisa diturunkan
+        if not k.get("saham") and k.get("mcap") and t not in harga:
+            h = ah_harga_info(t)
+            if h:
+                harga[t] = {"h": h}
+    hasil = AH.analisa(_json_berkas("pov-ah.json"), profil_indeks(), ks, harga, nama_semua(), radar_tickers(), batas=200)
+    for r in hasil["portofolio"] + hasil["pernah"] + hasil["rows"] + hasil["tanpaFF"]:
+        r["backdoor"] = (((pd_baca(r["t"]) or {}).get("hasil") or {}).get("backdoor") or {}).get("skor")
+        r.update(ah_status(r["t"]))
+    belum = [r["t"] for r in hasil["portofolio"] + hasil["pernah"] + hasil["rows"] + hasil["tanpaFF"] if not r["dicek"]]
+    hasil["suspen"] = [{"t": r["t"], "nama": r["nama"], "skor": r["skor"]} for r in hasil["rows"] if r.get("suspen")]
+    hasil["rows"] = [r for r in hasil["rows"] if not r.get("suspen")][:60]
+    hasil["tanpaFF"] = [r for r in hasil["tanpaFF"] if not r.get("suspen")]
+    hasil["belumDicek"] = len(belum)
+    hasil["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Emiten yang saham beredar/free float-nya kosong: status dan harga dari info emiten (Key Stats sendiri diperbarui
+    # mingguan lewat s50_kandidat_universe).
+    _ah_belum = belum + [t for t in hasil["kurangData"] if not ah_status(t).get("dicek")]
+    _ah_memo = (time.time(), hasil)
+    ah_mulai_isi()
+    return hasil
+
+
+def saham50_build() -> dict:
+    """Bangun daftar Saham 50 (dipanggil di latar). Butuh token Stockbit untuk harga dan keterbukaan."""
+    cfg = load_config() or {}
+    ks = lks_load()
+    lk = {r["t"]: r for r in lk_api().get("rows") or []}
+    items = {it["ticker"]: it for it in items_all()}
+    pandangan = _json_berkas("pandangan-analis.json")
+    try:
+        kand = {x["ticker"]: x for x in (get_kandidat(cfg).get("items") or [])}
+    except Exception:
+        kand = {}
+    hari_ini = datetime.now()
+    batas90 = (hari_ini - timedelta(days=90)).strftime("%Y-%m-%d")
+
+    def satu(t):
+        try:
+            tek = s50_teknikal(chart_prices(t))
+        except Exception:
+            return None
+        if not tek or tek["harga"] > S50_BATAS:
+            return None
+        try:
+            laporan = get_reports(cfg.get("reports") or {}, t, max_pages=1) if cfg.get("reports") else []
+        except Exception:
+            laporan = []
+        # Broker 30 hari terakhir langsung per saham (saham gocap jarang masuk 25 teratas data Pola Broker).
+        try:
+            dari = (hari_ini - timedelta(days=30)).strftime("%Y-%m-%d")
+            bk = s50_broker_parse(sb_fetch(f"/marketdetectors/{t}?from={dari}&to={hari_ini.strftime('%Y-%m-%d')}"
+                                           "&transaction_type=TRANSACTION_TYPE_NET&market_board=MARKET_BOARD_REGULER"
+                                           "&investor_type=INVESTOR_TYPE_ALL&limit=10"))
+        except Exception:
+            bk = None
+        time.sleep(0.4)
+        return t, tek, laporan, bk
+
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        hasil = [x for x in ex.map(satu, sorted(s50_kandidat_universe(ks))) if x]
+
+    rows = []
+    try:
+        brk = s50_broker({h[0] for h in hasil})
+    except Exception as e:
+        print(f"[saham50] pola broker gagal: {e}", file=sys.stderr)
+        brk = {}
+    for t, tek, laporan, bk in hasil:
+        k, it, pa, kd, r = ks.get(t) or {}, items.get(t), pandangan.get(t), kand.get(t), lk.get(t)
+        rs = k.get("rasio") or {}
+        aksi = []
+        for u in laporan:
+            sig = kandidat_sigs(u.get("title", ""))
+            if sig and not RUTIN_LK_RX.search(u.get("title", "")):
+                aksi.append({"tgl": u["date"], "judul": u["title"], "jenis": sig, "url": u.get("url"),
+                             "inti": (re.search(r"Inti:\s*(.+?)\s*(\(Ringkasan AI Stockbit\))?$", u.get("summary") or "") or [None, ""])[1]})
+        aksi.sort(key=lambda a: a["tgl"], reverse=True)
+        jenis90 = {j for a in aksi if a["tgl"] >= batas90 for j in a["jenis"]}
+        # Skor potensi 0-100 dan narasi.
+        skor, potensi, risiko = 0, [], []
+        hindari = bool(pa and re.search(r"hindari", pa.get("sikap") or "", re.I))
+        if it:
+            # Sikap analisa radar "Hindari" tidak menambah skor; dicatat sebagai risiko.
+            skor += 5 if hindari else 25
+            potensi.append(f"Masuk radar backdoor (tahap {it.get('stage') or '-'})" + (f"; sikap analisa {pa['sikap']}" if pa and pa.get("sikap") else ""))
+            if hindari:
+                risiko.append(f"Sikap analisa radar: {pa['sikap']} ({(pa.get('ringkas') or '')[:140]})")
+        elif kd:
+            skor += 20
+            sig = ", ".join(S50_AKSI.get(s, s).lower() for s, v in (kd.get("signals") or {}).items() if (v or {}).get("st") == "on")
+            potensi.append(f"Calon cangkang (Kandidat): sinyal {sig or 'awal'}")
+        if "akuisisi" in jenis90 and not it:
+            skor += 15
+        if jenis90 & {"rights", "kbli"}:
+            skor += 10
+        for a in aksi[:3]:
+            if a["tgl"] >= batas90 and set(a["jenis"]) - {"uma"}:
+                potensi.append(f"{a['tgl']}: {a['judul'][:110]}")
+        kw = (r or {}).get("kuartal") or {}
+        if kw.get("tumbuh"):
+            skor += 15
+            potensi.append(f"Laba Q{kw['q']} murni " + ("berbalik menjadi laba" if kw["status"] == "berbalik" else f"naik {kw['yoy']:.1f}% YoY".replace(".", ","))
+                           + " dan lebih besar dari kuartal sebelumnya")
+        elif kw.get("status") in ("naik", "berbalik"):
+            skor += 8
+            potensi.append(f"Laba Q{kw['q']} murni naik dari tahun lalu, tetapi tidak lebih besar dari kuartal sebelumnya")
+        elif r and r.get("kategori") in ("bagus", "berbalik"):
+            skor += 8
+            potensi.append(f"Laporan {r.get('periode')}: {r.get('judul', '')}")
+        elif r and r.get("kategori") == "rugi":
+            risiko.append(f"Masih rugi ({r.get('judul', '')})")
+        pbv = rs.get("Current Price to Book Value")
+        if pbv is not None and 0 < pbv < 0.5:
+            skor += 10
+            potensi.append(f"PBV {pbv:.2f}x: harga jauh di bawah nilai buku".replace(".", ","))
+        elif pbv is not None and 0 < pbv < 1:
+            skor += 5
+            potensi.append(f"PBV {pbv:.2f}x (di bawah nilai buku)".replace(".", ","))
+        elif pbv is not None and pbv < 0:
+            risiko.append("Ekuitas negatif (PBV negatif)")
+        if tek["diAtasEma20"] and (tek["rsi"] or 0) >= 45 and (tek["ret"]["1M"] or 0) > 0:
+            skor += 10
+            potensi.append("Teknikal mulai naik: di atas EMA20 dan kinerja 1 bulan positif")
+        elif tek["dariRendah"] <= 10 and not tek["datar"]:
+            skor += 5
+            potensi.append(f"Dekat titik terendah 52 minggu (+{tek['dariRendah']:.1f}% dari dasar)".replace(".", ","))
+        # Utama: ringkasan broker 30 hari per saham; cadangan: data Pola Broker bulanan.
+        pb = [{**bk, "bulan": None, "label": "30 hari"}] if bk else [{**b, "label": f"bulan {b['bulan']}"} for b in brk.get(t) or []]
+        if pb and pb[-1]["bandar"] > 0:
+            potensi.append(f"Broker {pb[-1]['label']}: akumulasi oleh {', '.join(pb[-1]['akum']) or '-'}")
+        elif pb and pb[-1]["bandar"] < 0:
+            risiko.append(f"Broker {pb[-1]['label']}: distribusi oleh {', '.join(pb[-1]['dist']) or '-'}")
+        if "uma" in jenis90:
+            risiko.append("Peringatan UMA / suspensi dalam 90 hari terakhir")
+        if tek["datar"]:
+            risiko.append("Harga hampir tidak bergerak 20 hari: likuiditas sangat tipis")
+        if tek["harga"] < S50_BATAS:
+            risiko.append("Harga di bawah Rp50: umumnya berada di Papan Pemantauan Khusus (full call auction)")
+        if k.get("freeFloat") is not None and k["freeFloat"] < 7.5:
+            risiko.append(f"Free float {k['freeFloat']:.1f}% (rendah)".replace(".", ","))
+        target = None
+        nw = (pa or {}).get("nilaiWajar") or {}
+        if nw.get("atas") and nw["atas"] > tek["harga"]:
+            target = {"harga": nw["atas"], "dasar": "batas atas nilai wajar analisa radar"}
+        elif nw.get("atas"):
+            risiko.append(f"Harga di atas nilai wajar analisa radar (Rp{nw.get('bawah', '-')}–{nw['atas']})")
+        elif tek["potensiTeknikal"] > 0:
+            target = {"harga": tek["resistance"], "dasar": "resistance terdekat (tertinggi 60 hari)"}
+        if target:
+            target["potensi"] = round((target["harga"] / tek["harga"] - 1) * 100, 1)
+        rows.append({"t": t, "nama": (r or {}).get("nama") or (it or {}).get("name") or "", "skor": min(skor, 100),
+                     "harga": tek["harga"], "tek": tek, "radar": bool(it), "kandidat": bool(kd), "tahap": (it or {}).get("stage"),
+                     "aksi": aksi[:8], "jenisAksi": sorted(jenis90), "kinerja": {"periode": (r or {}).get("periode"), "judul": (r or {}).get("judul"),
+                     "kategori": (r or {}).get("kategori"), "kuartal": kw or None},
+                     "valuasi": {"pbv": pbv, "pe": rs.get("Current PE Ratio (TTM)"), "mcap": k.get("mcap"), "freeFloat": k.get("freeFloat")},
+                     "potensi": potensi, "risiko": risiko, "target": target, "broker": pb})
+    rows.sort(key=lambda x: (-x["skor"], x["t"]))
+    try:
+        s50_riwayat(rows, hari_ini.date())
+    except OSError as e:
+        print(f"[saham50] riwayat gagal: {e}", file=sys.stderr)
+    return {"updated": hari_ini.strftime("%Y-%m-%d %H:%M"), "batas": S50_BATAS, "n": len(rows), "rows": rows, "versi": S50_VERSI}
+
+
+def saham50_api() -> dict:
+    try:
+        d = json.loads(S50_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"error": "Daftar Saham 50 sedang disusun server; muat ulang beberapa menit lagi.", "rows": []}
+    # Kinerja kuartal dan valuasi selalu dari data terbaru (daftar disusun sekali sehari; Key Stats/LK bisa lebih baru).
+    lk = {r["t"]: r for r in lk_api_cache().get("rows") or []}
+    ks = lks_load()
+    for x in d.get("rows") or []:
+        r, k = lk.get(x["t"]), ks.get(x["t"]) or {}
+        if r:
+            x["kinerja"] = {"periode": r.get("periode"), "judul": r.get("judul"), "kategori": r.get("kategori"), "kuartal": r.get("kuartal")}
+        rs = k.get("rasio") or {}
+        v = x.get("valuasi") or {}
+        x["valuasi"] = {"pbv": v.get("pbv") if v.get("pbv") is not None else rs.get("Current Price to Book Value"),
+                        "pe": v.get("pe") if v.get("pe") is not None else rs.get("Current PE Ratio (TTM)"),
+                        "mcap": v.get("mcap") or k.get("mcap"), "freeFloat": v.get("freeFloat") if v.get("freeFloat") is not None else k.get("freeFloat")}
+    return d
+
+
+def s50_tertinggal(now: datetime) -> bool:
+    """Daftar disusun sebelum hari bursa kemarin (WIB), mis. jadwal sore terlewat saat token mati: susun sekarang
+    tanpa menunggu pukul 17.00. Normalnya daftar dibuat sore hari bursa sebelumnya, jadi tidak memicu."""
+    try:
+        dibuat = datetime.fromtimestamp(S50_PATH.stat().st_mtime, timezone.utc).astimezone(timezone(timedelta(hours=7))).date()
+    except OSError:
+        return False
+    return dibuat < hari_bursa_mundur(now.astimezone(timezone(timedelta(hours=7))).date(), 1)
+
+
+def s50_data_kosong() -> bool:
+    """Daftar tersimpan disusun saat Key Stats belum tersedia (valuasi kosong hampir semua) padahal kini sudah ada."""
+    try:
+        rows = json.loads(S50_PATH.read_text(encoding="utf-8")).get("rows") or []
+    except (OSError, ValueError):
+        return False
+    try:
+        if json.loads(S50_PATH.read_text(encoding="utf-8")).get("versi") != S50_VERSI:
+            return True
+    except (OSError, ValueError):
+        return False
+    if not rows or sum(1 for x in rows if (x.get("valuasi") or {}).get("pbv") is not None) >= len(rows) * 0.2:
+        return False
+    ks = lks_load()
+    return sum(1 for x in rows if (ks.get(x["t"]) or {}).get("rasio")) >= len(rows) * 0.5
+
+
+def saham50_loop() -> None:
+    """Susun ulang daftar Saham 50 sekali sehari (setelah bursa tutup, >= 17.00 WIB) atau bila berkas belum ada."""
+    time.sleep(240)
+    while True:
+        try:
+            jam = datetime.now(timezone(timedelta(hours=7)))
+            lama = not S50_PATH.exists() or datetime.fromtimestamp(S50_PATH.stat().st_mtime).date() < jam.date()
+            if get_token() and not token_expired() and (not S50_PATH.exists() or (lama and jam.hour >= 17) or s50_data_kosong()
+                                                        or s50_tertinggal(jam)):
+                d = saham50_build()
+                tmp = S50_PATH.with_suffix(".tmp")
+                tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+                tmp.replace(S50_PATH)
+                print(f"[saham50] {d['n']} saham <= Rp{S50_BATAS}", file=sys.stderr)
+        except Exception as e:
+            print(f"[saham50] gagal: {e}", file=sys.stderr)
+        time.sleep(1800)
+
+
+# ------------------------------------------------------- POV: analisa mendalam ----
+# Satu emiten BEI mana pun, ditarik saat tombol "Analisa mendalam" diklik (pekerjaan latar, maks. 15 menit):
+# profil & pemegang saham, jaringan tiap pemegang di emiten lain (+ pemegang emiten grup), riwayat keterbukaan
+# pemegang saham, keterbukaan informasi 1 tahun, berita, kinerja, dan posting publik Stockbit. Disusun aturan
+# otomatis oleh povdalam.analyze(). Seluruh saham BEI juga ditarik bertahap di latar (pd_latar_loop); hasil disimpan
+# satu berkas per saham di .pov-dalam/ dan dipakai terus sampai ada data baru (keterbukaan informasi atau perubahan
+# pemegang saham di feed seluruh BEI) atau umurnya lewat PD_MAKS_UMUR.
+PD_DIR = ROOT / ".pov-dalam"
+PD_LAMA = ROOT / ".pov-dalam.json"          # format lama (satu berkas, maks. 200 saham), dipecah sekali
+PD_PEMICU_PATH = ROOT / ".pov-dalam-pemicu.json"
+PD_BATAS_DETIK, PD_MAKS_JALAN, PD_MAKS_JAM = 15 * 60, 2, 30
+PD_MAKS_UMUR = 14 * 86400    # tanpa data baru pun, analisa ditarik ulang paling lama tiap 14 hari
+PD_LATAR_JEDA = 15           # detik antar-saham di latar
+PD_GAGAL_JEDA = 24 * 3600    # saham yang gagal di latar dicoba lagi sehari kemudian
+PD_AKUN_RESMI = {"stockbitreports", "stockbitnews", "stockbit", "stockbitofficial"}
+# Keterbukaan rutin tidak mengubah isi analisa (registrasi bulanan sudah tercermin di data KSEI).
+PD_RUTIN_RX = re.compile(r"registrasi pemegang efek|bukti iklan|obligasi|sukuk|efek bersifat utang|kupon|"
+                         r"bunga (obligasi|mtn)|medium term note|\bmtn\b", re.I)
+_pd_jobs: dict[str, dict] = {}
+_pd_lock = threading.Lock()
+_pd_idx_lock = threading.RLock()
+_pd_mulai: list[float] = []
+_pd_indeks: dict[str, dict] | None = None    # {t: {"at", "versi"}}, dibangun dari berkas saat pertama dipakai
+_pd_gagal_latar: dict[str, float] = {}
+PD_LATAR = {"aktif": False, "t": None, "selesai": 0, "gagal": 0, "antre": None, "pantau": None, "terakhir": None}
+
+
+def _pd_berkas(t: str) -> Path:
+    return PD_DIR / f"{t}.json"
+
+
+def _pd_tulis(f: Path, d) -> None:
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(f)
+
+
+def pd_baca(t: str) -> dict | None:
+    """Analisa tersimpan satu saham: {"at", "hasil"} atau None."""
+    try:
+        return json.loads(_pd_berkas(t).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def pd_indeks() -> dict:
+    """{t: {"at", "versi"}} seluruh analisa tersimpan. Format lama .pov-dalam.json dipecah dulu (sekali)."""
+    global _pd_indeks
+    with _pd_idx_lock:
+        if _pd_indeks is None:
+            PD_DIR.mkdir(exist_ok=True)
+            try:
+                lama = json.loads(PD_LAMA.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                lama = None
+            if lama is not None:
+                for t, v in lama.items():
+                    if TICKER_RE.match(t) and isinstance(v, dict) and not _pd_berkas(t).exists():
+                        _pd_tulis(_pd_berkas(t), v)
+                PD_LAMA.unlink(missing_ok=True)
+            idx = {}
+            for f in PD_DIR.glob("*.json"):
+                v = pd_baca(f.stem) if TICKER_RE.match(f.stem) else None
+                if v:
+                    idx[f.stem] = {"at": v.get("at") or 0, "versi": (v.get("hasil") or {}).get("versi")}
+            _pd_indeks = idx
+        return _pd_indeks
+
+
+def pd_simpan(t: str, hasil: dict) -> None:
+    with _pd_idx_lock:
+        idx = pd_indeks()
+        at = time.time()
+        _pd_tulis(_pd_berkas(t), {"at": at, "hasil": hasil})
+        idx[t] = {"at": at, "versi": hasil.get("versi")}
+
+
+def pd_pemicu_load() -> dict:
+    """{t: [{"k", "waktu", "tgl", "teks"}]}: data baru per saham dari feed seluruh BEI (30 hari)."""
+    try:
+        return json.loads(PD_PEMICU_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def pd_pemicu_catat(rows: list[tuple[str, str, str, str]], now: float | None = None) -> int:
+    """Catat baris feed (ticker, kunci, tanggal, teks) yang belum pernah terlihat. Waktu catat = saat pertama
+    terlihat; pada pencatatan pertama kali (berkas belum ada) memakai awal tanggal baris agar analisa yang dibuat
+    setelahnya tidak dianggap ketinggalan. Mengembalikan jumlah baris baru."""
+    now = now or time.time()
+    awal = not PD_PEMICU_PATH.exists()
+    d = pd_pemicu_load()
+    batas = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    baru = 0
+    for t, k, tgl, teks in rows:
+        if not TICKER_RE.match(t or "") or not tgl or tgl < batas:
+            continue
+        ada = d.setdefault(t, [])
+        if any(x["k"] == k for x in ada):
+            continue
+        try:
+            w = datetime.strptime(tgl, "%Y-%m-%d").timestamp() if awal else now
+        except ValueError:
+            w = now
+        ada.append({"k": k, "waktu": w, "tgl": tgl, "teks": teks[:160]})
+        baru += 1
+    d = {t: sorted([x for x in v if x["tgl"] >= batas], key=lambda x: -x["waktu"])[:15] for t, v in d.items()}
+    _pd_tulis(PD_PEMICU_PATH, {t: v for t, v in d.items() if v})
+    return baru
+
+
+def pd_pantau() -> int:
+    """Baca keterbukaan informasi dan perubahan pemegang saham seluruh BEI (3 hari) lalu catat sebagai pemicu."""
+    rows: list[tuple[str, str, str, str]] = []
+    try:
+        rows += [(r["ticker"], r["url"], r["date"], r["title"]) for r in market_reports(days=3, pages=10, fresh=True)
+                 if not PD_RUTIN_RX.search(r["title"])]
+    except Exception as e:
+        print(f"[pov-dalam] pantau keterbukaan: {e}", file=sys.stderr)
+    try:
+        rows += [(r["ticker"], f"{r['name']}|{r['date']}|{r['cur']}", r["date"],
+                  f"{r['name'].title()}: {r['prev']:g}% → {r['cur']:g}% ({r['source']})")
+                 for r in get_insider_feed(3, fresh=True).get("rows") or []]
+    except Exception as e:
+        print(f"[pov-dalam] pantau pemegang saham: {e}", file=sys.stderr)
+    n = pd_pemicu_catat(rows)
+    PD_LATAR["pantau"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return n
+
+
+def pd_basi(t: str, simpan: dict, pemicu: dict | None = None, now: float | None = None) -> str:
+    """Alasan analisa tersimpan perlu ditarik ulang, atau '' bila masih berlaku."""
+    now = now or time.time()
+    at = simpan.get("at") or 0
+    baru = [x for x in (pemicu if pemicu is not None else pd_pemicu_load()).get(t, []) if x["waktu"] > at]
+    if baru:
+        teks = "; ".join(f"{x['teks']} ({x['tgl']})" for x in baru[:2])
+        return f"Ada data baru sejak analisa ini: {teks}" + (f" dan {len(baru) - 2} lainnya" if len(baru) > 2 else "") + "."
+    if now - at > PD_MAKS_UMUR:
+        return f"Analisa berumur lebih dari {PD_MAKS_UMUR // 86400} hari."
+    return ""
+
+
+def pd_posts(t: str, halaman: int = 10) -> tuple[list[dict], str]:
+    """Posting publik (ide) tentang satu saham dari stream simbol Stockbit, tanpa akun resmi laporan/berita."""
+    for kat in ("STREAM_CATEGORY_IDEAS", "STREAM_CATEGORY_MAIN_IDEAS", "STREAM_CATEGORY_ALL"):
+        out, cursor = [], 0
+        try:
+            for _ in range(halaman):
+                d = sb_fetch(f"/stream/v3/symbol/{t}?category={kat}&last_stream_id={cursor}&limit=20").get("data") or {}
+                page = d.get("stream") or []
+                for p in page:
+                    user = str(p.get("username") or (p.get("user") or {}).get("username") or "")
+                    txt = re.sub(r"\s+", " ", str(p.get("content_original") or p.get("content") or "")).strip()
+                    if user.lower() in PD_AKUN_RESMI or not txt:
+                        continue
+                    out.append({"user": user, "d": str(p.get("created_at") or "")[:10], "txt": txt,
+                                "likes": int(p.get("total_likes") or 0), "url": f"https://stockbit.com/post/{p.get('stream_id')}"})
+                if not page or (d.get("pagination") or {}).get("is_last_page"):
+                    break
+                cursor = (d.get("pagination") or {}).get("next_cursor") or page[-1].get("stream_id")
+                time.sleep(0.25)
+        except Exception as e:
+            print(f"[pov-dalam] posting {t} {kat}: {e}", file=sys.stderr)
+            continue
+        if out:
+            return out, kat
+    return [], ""
+
+
+def pd_berita_luar(kueri: list[str]) -> list[dict]:
+    """Berita di luar Stockbit dari Google News RSS (sumber publik): judul, tanggal, media, tautan, kueri pencarinya."""
+    out, ada = [], set()
+    for q in kueri:
+        url = "https://news.google.com/rss/search?" + urllib.parse.urlencode({"q": q, "hl": "id", "gl": "ID", "ceid": "ID:id"})
+        try:
+            xml = cached_text(url, lambda: http_get(url, {"User-Agent": UA_BROWSER}, 20))
+        except Exception as e:
+            print(f"[pov-dalam] berita luar {q}: {e}", file=sys.stderr)
+            continue
+        for it in re.findall(r"<item>(.*?)</item>", xml, re.S)[:12]:
+            g = lambda tag: html_mod.unescape(re.sub(r"<!\[CDATA\[|\]\]>", "", (re.search(rf"<{tag}[^>]*>(.*?)</{tag}>", it, re.S) or [None, ""])[1])).strip()
+            judul, link = g("title"), g("link")
+            if not judul or judul in ada:
+                continue
+            ada.add(judul)
+            try:
+                tg = datetime.strptime(g("pubDate")[:16], "%a, %d %b %Y").strftime("%Y-%m-%d")
+            except ValueError:
+                tg = ""
+            out.append({"judul": re.sub(r"\s+-\s+[^-]+$", "", judul), "sumber": g("source"), "date": tg, "url": link, "kueri": q})
+        time.sleep(0.4)
+    return sorted(out, key=lambda x: x["date"], reverse=True)
+
+
+def pd_kumpul(t: str, job: dict, ringan: bool = False) -> dict:
+    """ringan=True (pemindai malam): fokus kepemilikan/afiliasi/backdoor/bandar; tanpa berita, posting, Google News,
+    profil tokoh; jaringan & preseden lebih sedikit agar Stockbit tidak terbebani."""
+    mulai = time.time()
+    catatan: list[str] = []
+
+    def tahap(i, label):
+        job.update({"langkah": i, "label": label})
+
+    def sisa():
+        return PD_BATAS_DETIK - (time.time() - mulai)
+    cfg = (load_config() or {}).get("reports") or {}
+    tahap(1, "Profil, pemegang saham, dan valuasi")
+    prof = get_profile(t)
+    praw = sb_fetch(f"/emitten/{t}/profile").get("data") or {}   # dari cache (baru diambil get_profile)
+    profil_indeks_isi(t, praw)
+    rk = profil_ringkas(praw)
+    detail_pmg = {PG.kunci_orang(n): {"dom": dom, "kls": kls} for n, _, dom, kls in rk["pemegang"]}
+    tahap(2, "Riwayat keterbukaan pemegang saham (KSEI/IDX)")
+    try:
+        insider = get_insider_rows(t)["rows"]
+    except Exception as e:
+        insider = []
+        catatan.append(f"Riwayat pemegang saham gagal diambil: {e}"[:160])
+    pmg = [s for s in (prof.get("shareholders") or []) + (prof.get("holders1") or [])
+           if s.get("name") and not PD.PUBLIK_RX.search(s["name"])]
+    nama_pmg = list(dict.fromkeys(s["name"] for s in sorted(pmg, key=lambda s: -PD._pct(s.get("pct")))))[:6 if ringan else 10]
+    # Orang dalam yang aktif bertransaksi 180 hari (mis. penjual bertahap) ikut ditelusuri jaringannya.
+    batas180 = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
+    aktif: dict[str, float] = {}
+    for r in insider:
+        if r["date"] >= batas180:
+            aktif[r["name"]] = aktif.get(r["name"], 0) + abs(r.get("chg") or 0)
+    sudah = {PD._kunci(n) for n in nama_pmg}
+    nama_pmg += [n for n, v in sorted(aktif.items(), key=lambda kv: -kv[1]) if v >= 0.3 and PD._kunci(n) not in sudah][:2 if ringan else 4]
+    # Perkiraan waktu setelah jumlah pemegang diketahui (disampaikan ke pengunjung).
+    job["estimasi"] = int(min(PD_BATAS_DETIK, 60 + 25 * len(nama_pmg) + 120))
+    tahap(3, f"Menelusuri jaringan {len(nama_pmg)} pemegang saham di emiten lain")
+    jaringan = {}
+    for i, n in enumerate(nama_pmg):
+        if sisa() < 240:
+            catatan.append(f"Waktu terbatas: jaringan {len(nama_pmg) - i} pemegang terakhir tidak ditelusuri.")
+            break
+        job["label"] = f"Menelusuri jaringan pemegang saham ({i + 1}/{len(nama_pmg)}): {n}"
+        try:
+            jaringan[n] = get_controller(t, n).get("holdings") or []
+        except Exception as e:
+            catatan.append(f"Jaringan {n} gagal: {e}"[:160])
+    tahap(4, "Profil emiten grup (dimiliki pemegang yang sama)")
+    grup: dict[str, dict] = {}
+    hit: dict[str, int] = {}
+    for hs in jaringan.values():
+        for h in hs:
+            if h.get("symbol") and h["symbol"] != t:
+                hit[h["symbol"]] = hit.get(h["symbol"], 0) + 1
+    for s in sorted(hit, key=lambda s: -hit[s])[:4 if ringan else 8]:
+        if sisa() < 150:
+            break
+        try:
+            p = sb_fetch(f"/emitten/{s}/profile").get("data") or {}
+            profil_indeks_isi(s, p)
+            grup[s] = {"t": s, "nama": nama_semua().get(s, ""), "sektor": ((p.get("classification") or {}).get("industry") or {}).get("name", ""),
+                       "pemegang": [{"name": x.get("name"), "pct": x.get("percentage")} for x in (p.get("shareholder") or [])[:5]]}
+        except Exception:
+            pass
+    tahap(5, "Keterbukaan informasi 1 tahun")
+    laporan = []
+    if cfg.get("url"):
+        try:
+            laporan = get_reports({**cfg, "days": 365}, t, max_pages=5 if ringan else 10)
+        except Exception as e:
+            catatan.append(f"Keterbukaan informasi gagal: {e}"[:160])
+    for u in laporan:
+        u["jenis"] = kandidat_sigs(u.get("title", ""))
+        u["inti"] = (re.search(r"Inti:\s*(.+?)\s*(\(Ringkasan AI Stockbit\))?$", u.get("summary") or "") or [None, ""])[1]
+    tahap(6, "Berita")
+    berita = []
+    if cfg.get("url") and sisa() > 90 and not ringan:
+        try:
+            berita = get_sb_news(cfg, t, pages=3)
+        except Exception as e:
+            catatan.append(f"Berita gagal: {e}"[:160])
+    tahap(7, "Posting publik Stockbit tentang saham ini")
+    posts, kat = pd_posts(t, 10 if sisa() > 120 else 3) if not ringan else ([], "")
+    if not posts and not ringan:
+        catatan.append("Posting publik tidak ditemukan atau tidak dapat diambil.")
+    try:
+        keystats = {} if ringan else lks_parse((sb_fetch(f"/keystats/ratio/v1/{t}?year_limit=3").get("data") or {}))
+    except Exception as e:
+        keystats = {}
+        catatan.append(f"Key Stats kuartalan gagal: {e}"[:160])
+    tahap(8, "Berita di luar Stockbit (Google News)")
+    nama_e = re.sub(r"\s*Tbk\.?$", "", nama_semua().get(t, ""), flags=re.I).strip()
+    kueri = [f'"{nama_e}"' if nama_e else t, f"saham {t}"]
+    bersih = [re.sub(r"^PT\s+|\s+(PT|TBK)$", "", n, flags=re.I).strip() for n in nama_pmg[:3]]
+    jangkar0 = f'"{nama_e}"' if nama_e else t
+    kueri += [f'"{n}" {jangkar0}' for n in bersih if n]
+    # Nama dari klaim publik dicari bersama nama emiten agar tidak tercampur orang/berita lain bernama sama.
+    jangkar = f'"{nama_e}"' if nama_e else t
+    kueri += [f'"{n}" {jangkar}' for n in PD.nama_dari_posts(posts, t)]
+    berita_luar = pd_berita_luar(list(dict.fromkeys(kueri))[:10]) if sisa() > 60 and not ringan else []
+    # Hanya berita bisnis/pasar modal yang relevan dengan emiten atau pihak terkait.
+    kunci = [w for w in re.findall(r"[A-Za-z]{4,}", nama_e) if w.lower() not in ("indonesia", "internasional", "nusantara")][:2]
+    relevan = re.compile(r"\b(" + "|".join([t] + [re.escape(w) for w in kunci]) + r")\b|saham|tbk|emiten|bursa|bisnis|grup|group|"
+                         r"perusahaan|investasi|akuisisi|direksi|komisaris|kontrak|tambang|batu ?bara|pengendali|konglomerat|taipan", re.I)
+    UMUM = {"corporation", "group", "investama", "indonesia", "holdings", "holding", "international", "capital", "persada", "abadi",
+            "mandiri", "sejahtera", "global", "resources", "family"}
+    pihak = {w.lower() for n in bersih + PD.nama_dari_posts(posts, t) for w in re.findall(r"[A-Za-z]{4,}", n) if w.lower() not in UMUM}
+    # Kode saham atau nama emiten (dua kata pertama sebagai frasa, mis. "Indo Straits", "Argha Karya").
+    frasa = " ".join(nama_e.split()[:2]) if len(nama_e.split()) >= 2 else nama_e
+    wajib = re.compile(r"\b(" + "|".join([t] + ([re.escape(frasa)] if frasa else [])) + r")\b", re.I)
+    # Profil tokoh: UBO, pemegang perorangan >= 5%, komisaris utama, direktur utama (nama orang cukup khas).
+    orang = list(prof.get("beneficiary") or [])
+    orang += [s["name"] for s in prof.get("shareholders") or [] if not PD.BADAN_RX.search(s["name"]) and not PD.PUBLIK_RX.search(s["name"])
+              and not re.search(r"warkat|lainnya|others", s["name"], re.I) and PD._pct(s.get("pct")) >= 5]
+    orang += [re.sub(r"\s*\(.*\)$", "", x) for x in (prof.get("commissioners") or [])[:1] + (prof.get("directors") or [])[:1]]
+    tokoh = []
+    for n in list(dict.fromkeys(o.title() for o in orang if len(o.split()) >= 2))[:0 if ringan else 4]:
+        if sisa() < 45:
+            break
+        kata = [w for w in n.split() if len(w) >= 3]
+        hasil_n = [b for b in pd_berita_luar([f'"{n}"']) if sum(1 for w in kata if re.search(rf"\b{re.escape(w)}\b", b["judul"], re.I)) >= 2]
+        tokoh.append({"nama": n, "berita": hasil_n[:8]})
+    berita_luar = [b for b in berita_luar if relevan.search(b["judul"]) and (
+        (wajib and wajib.search(b["judul"])) or sum(1 for w in pihak if re.search(rf"\b{re.escape(w)}\b", b["judul"], re.I)) >= 2)]
+    tahap(9, "Bandarmologi (broker 5/30/90 hari), jejak volume, dan preseden grup")
+    bk, brokers = None, {}
+    for hari in (5, 30, 90):
+        try:
+            dari = (datetime.now() - timedelta(days=hari * 7 // 5 + 2)).strftime("%Y-%m-%d")
+            resp = sb_fetch(f"/marketdetectors/{t}?from={dari}&to={datetime.now().strftime('%Y-%m-%d')}"
+                            "&transaction_type=TRANSACTION_TYPE_NET&market_board=MARKET_BOARD_REGULER"
+                            "&investor_type=INVESTOR_TYPE_ALL&limit=25")
+            brokers[hari] = PA.broker_parse(resp)
+            if hari == 30:
+                bk = s50_broker_parse(resp)
+        except Exception as e:
+            catatan.append(f"Broker {hari} hari gagal: {e}"[:160])
+    try:
+        bars = get_ohlc(t, "1y")
+    except Exception as e:
+        bars = []
+        catatan.append(f"Harga & volume harian gagal: {e}"[:160])
+    # Preseden: aksi korporasi 2 tahun di emiten lain milik pemegang yang sama (pola yang mungkin diulang).
+    grup_aksi = []
+    for s in list(grup)[:3 if ringan else 4]:
+        if sisa() < 60 or not cfg.get("url"):
+            break
+        try:
+            for u in get_reports({**cfg, "days": 730}, s, max_pages=2 if ringan else 3):
+                j = kandidat_sigs(u.get("title", ""))
+                if j:
+                    grup_aksi.append({"t": s, "date": u.get("date"), "judul": u.get("title"), "jenis": j})
+        except Exception as e:
+            catatan.append(f"Preseden {s} gagal: {e}"[:120])
+    nasib: dict = {}
+    if not ringan:
+        job["label"] = "Rekam jejak emiten jaringan (harga 3 tahun) dan UBO di berita lama"
+        emiten_jar: dict[str, str] = {}
+        for hs in jaringan.values():
+            for h in hs:
+                s = h.get("symbol")
+                if s and s != t:
+                    lepas = PD._pct(h.get("pct")) <= 0 or str(h.get("lastAction") or "").upper() in ("SELL", "JUAL")
+                    emiten_jar.setdefault(s, str(h.get("lastDate") or "") if lepas else "")
+        for s in list(emiten_jar)[:10]:
+            if sisa() < 50:
+                break
+            try:
+                nasib[s] = PG.nasib_emiten(chart_prices(s), emiten_jar[s])
+            except Exception:
+                pass
+    rekam_berita = []
+    if not ringan and sisa() > 45:
+        UMUM_N = {"PT", "TBK", "LTD", "PTE", "LIMITED", "INVESTAMA", "INDONESIA", "GROUP", "HOLDINGS", "HOLDING", "CAPITAL", "INTERNATIONAL"}
+        nama_rj = list(dict.fromkeys([re.sub(r"\s*\(.*\)$", "", u) for u in prof.get("beneficiary") or []] + bersih[:2]))[:4]
+        for n in nama_rj:
+            kata = [w for w in re.findall(r"[A-Za-z]{3,}", n) if w.upper() not in UMUM_N]
+            if not kata:
+                continue
+            q = f'"{n}" (suspensi OR delisting OR tersangka OR pailit OR PKPU OR gugatan OR sanksi OR akuisisi OR backdoor OR gocap)'
+            for b in pd_berita_luar([q]):
+                if sum(1 for w in kata if re.search(rf"\b{re.escape(w)}\b", b["judul"], re.I)) >= min(2, len(kata)):
+                    rekam_berita.append({**b, "nama": n})
+    tahap(10, "Menyusun analisa")
+    lk = next((r for r in lk_api_cache().get("rows") or [] if r["t"] == t), {})
+    hasil = PD.analyze({"t": t, "nama": nama_semua().get(t, ""), "profil": prof, "insider": insider, "jaringan": jaringan,
+                        "laporan": laporan, "berita": berita, "posts": posts, "lk": lk, "catatan": catatan, "broker": bk,
+                        "pandangan": _json_berkas("pandangan-analis.json").get(t), "beritaLuar": berita_luar,
+                        "brokers": {k: v for k, v in brokers.items() if v}, "bars": bars, "grupAksi": grup_aksi,
+                        "keystats": keystats, "tokoh": tokoh, "grupInfo": list(grup.values()),
+                        "indeks": profil_indeks(), "detailPemegang": detail_pmg, "jumlahPemegang": rk["jumlah"],
+                        "nasib": nasib, "rekamBerita": rekam_berita})
+    hasil["grup"] = list(grup.values())
+    hasil["radar"] = t in radar_tickers()
+    hasil["durasi"] = int(time.time() - mulai)
+    hasil["versi"] = PD.VERSI
+    return hasil
+
+
+def _pd_jalan(t: str) -> bool:
+    """Jalankan satu pekerjaan terdaftar di _pd_jobs. Hasil hanya disimpan di berkas (tidak ditahan di memori)."""
+    job = _pd_jobs[t]
+    try:
+        hasil = pd_kumpul(t, job)
+        pd_simpan(t, hasil)
+        with _pd_lock:
+            _pd_jobs.pop(t, None)
+        return True
+    except Exception as e:
+        print(f"[pov-dalam] {t} gagal: {e}", file=sys.stderr)
+        with _pd_lock:
+            if job.get("latar"):
+                _pd_jobs.pop(t, None)
+                _pd_gagal_latar[t] = time.time()
+            else:
+                job.update({"status": "gagal", "galat": str(e)[:200]})
+        return False
+
+
+def pd_urutan(now: float | None = None) -> list[str]:
+    """Antrean latar: (0) ada data baru sejak analisa, (1) belum dianalisa / versi lama, (2) umur > PD_MAKS_UMUR.
+    Di tiap kelompok emiten radar didahulukan, lalu Kandidat, lalu yang paling lama dianalisa."""
+    now = now or time.time()
+    idx, pem = pd_indeks(), pd_pemicu_load()
+    radar = {i["ticker"] for i in items_all()}
+    kd = radar_tickers()
+    semua = [t for t in dict.fromkeys(sorted(radar) + sorted(kd) + sorted(bei_kode_load())) if TICKER_RE.match(t)]
+    out = []
+    for t in semua:
+        v = idx.get(t)
+        if (_pd_jobs.get(t) or {}).get("status") == "jalan" or now - _pd_gagal_latar.get(t, 0) < PD_GAGAL_JEDA:
+            continue
+        if not v or v.get("versi") != PD.VERSI:
+            k = 1
+        elif pd_basi(t, v, pem, now):
+            k = 0 if any(x["waktu"] > v["at"] for x in pem.get(t, [])) else 2
+        else:
+            continue
+        out.append((k, t not in radar, t not in kd, (v or {}).get("at") or 0, t))
+    return [x[-1] for x in sorted(out)]
+
+
+def pd_latar_satu(t: str) -> bool:
+    with _pd_lock:
+        if t in _pd_jobs:
+            return False
+        _pd_jobs[t] = {"status": "jalan", "mulai": time.time(), "langkah": 0, "total": 10, "label": "Memulai",
+                       "estimasi": 180, "latar": True}
+    PD_LATAR["t"] = t
+    try:
+        ok = _pd_jalan(t)
+    finally:
+        PD_LATAR["t"] = None
+    PD_LATAR["selesai" if ok else "gagal"] += 1
+    PD_LATAR["terakhir"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    return ok
+
+
+def pd_latar_loop() -> None:
+    """Analisa mendalam seluruh saham BEI satu per satu di latar. Tiap 30 menit feed seluruh BEI dibaca untuk mencari
+    data baru; saham yang terkena ditarik ulang lebih dulu. Analisa yang diminta pengunjung didahulukan."""
+    time.sleep(600)
+    pantau = 0.0
+    while True:
+        try:
+            if not (get_token() and not token_expired()):
+                PD_LATAR["aktif"] = False
+                time.sleep(600)
+                continue
+            PD_LATAR["aktif"] = True
+            if time.time() - pantau > 1800:
+                pantau = time.time()
+                n = pd_pantau()
+                if n:
+                    print(f"[pov-dalam] {n} data baru di feed seluruh BEI", file=sys.stderr)
+            if any(j["status"] == "jalan" and not j.get("latar") for j in list(_pd_jobs.values())):
+                time.sleep(30)
+                continue
+            antre = pd_urutan()
+            PD_LATAR["antre"] = len(antre)
+            if not antre:
+                time.sleep(600)
+                continue
+            pd_latar_satu(antre[0])
+        except Exception as e:
+            print(f"[pov-dalam] latar: {e}", file=sys.stderr)
+            time.sleep(60)
+        time.sleep(PD_LATAR_JEDA)
+
+
+def pd_cakupan() -> dict:
+    """Jumlah saham BEI yang sudah punya analisa versi terbaru (untuk tampilan dan /api/status)."""
+    idx = _pd_indeks or {}
+    return {"tersimpan": sum(1 for v in idx.values() if v.get("versi") == PD.VERSI), "total": len(bei_kode_load()),
+            **{k: PD_LATAR[k] for k in ("aktif", "t", "antre", "selesai", "gagal", "pantau", "terakhir")}}
+
+
+# ------------------------------------------------- Pemindai calon cangkang ----
+# Tiap malam (01.30 WIB) analisa mendalam mode ringan untuk seluruh universe Kandidat + radar + Saham 50
+# (yang paling lama belum dipindai lebih dulu). Hasil ringkas di .pindai.json; turunannya: alarm penjual cangkang
+# (feed keterbukaan pasar), alarm broker market maker, peta grup pengendali, dan ringkasan harian.
+PINDAI_PATH = ROOT / ".pindai.json"
+PINDAI_PER_MALAM = 400   # praktis seluruh universe tiap malam
+PINDAI_PARALEL = 3       # saham dipindai bersamaan (± 45-60 menit per putaran)
+_pindai_lock = threading.Lock()
+_pindai_jalan = {"aktif": False, "selesai": 0, "total": 0}
+
+
+def pindai_load() -> dict:
+    try:
+        return json.loads(PINDAI_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def pindai_simpan(d: dict) -> None:
+    tmp = PINDAI_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(PINDAI_PATH)
+
+
+def pindai_universe() -> list[str]:
+    uni = [it["ticker"] for it in items_all()]
+    try:
+        uni += [x["ticker"] for x in (_kd_memo[1].get("items", []) if _kd_memo else [])]
+    except Exception:
+        pass
+    try:
+        uni += [r["t"] for r in sorted(saham50_api().get("rows") or [], key=lambda r: -r.get("skor", 0))]
+    except Exception:
+        pass
+    return [t for t in dict.fromkeys(uni) if TICKER_RE.match(t)]
+
+
+def pindai_jalan(batas: int = PINDAI_PER_MALAM) -> int:
+    """Pindai `batas` saham yang paling lama belum dipindai, lalu hitung alarm, peta grup, ringkasan."""
+    if not (get_token() and not token_expired()):
+        return 0
+    with _pindai_lock:
+        if _pindai_jalan["aktif"]:
+            return 0
+        _pindai_jalan.update({"aktif": True, "selesai": 0})
+    try:
+        d = pindai_load()
+        rows = d.get("rows") or {}
+        # Saham yang dipindai < 20 jam lalu dilewati (mis. server restart di tengah pemindaian).
+        segar = (datetime.now() - timedelta(hours=20)).strftime("%Y-%m-%d %H:%M")
+        urut = [t for t in sorted(pindai_universe(), key=lambda t: (rows.get(t) or {}).get("dibuat") or "")
+                if ((rows.get(t) or {}).get("dibuat") or "") < segar or (rows.get(t) or {}).get("versi") != PD.VERSI][:batas]
+        _pindai_jalan["total"] = len(urut)
+
+        def satu(t):
+            try:
+                h = pd_kumpul(t, {}, ringan=True)
+                return t, PP.baris(h)
+            except Exception as e:
+                print(f"[pindai] {t} gagal: {e}", file=sys.stderr)
+                return t, None
+            finally:
+                time.sleep(0.5)
+        # Tiga saham sekaligus: ±3x lebih cepat tanpa membanjiri Stockbit (cache bersama mengurangi panggilan ulang).
+        with ThreadPoolExecutor(max_workers=PINDAI_PARALEL) as ex:
+            for i, (t, r) in enumerate(ex.map(satu, urut)):
+                if r:
+                    rows[t] = r
+                _pindai_jalan["selesai"] = i + 1
+                if (i + 1) % 10 == 0:
+                    d["rows"] = rows
+                    pindai_simpan(d)
+        hari = datetime.now().strftime("%Y-%m-%d")
+        riw = d.get("riwayat") or {}
+        lalu_tgl = max((x for x in riw if x < hari), default=None)
+        lalu = riw.get(lalu_tgl) or {}
+        riw[hari] = {t: r["skor"] for t, r in rows.items()}
+        riw = {k: v for k, v in riw.items() if k >= (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")}
+        # Alarm penjual cangkang: daftar dari pemindai + analisa mendalam tersimpan, dicocokkan dengan feed 3 hari.
+        semua = dict(rows)
+        for t in list(pd_indeks()):
+            v = pd_baca(t) or {}
+            if (v.get("hasil") or {}).get("jejakCangkang"):
+                semua.setdefault(t, PP.baris(v["hasil"]))
+        penjual = PP.penjual_cangkang(semua)
+        try:
+            feed = get_insider_feed(3).get("rows") or []
+        except Exception as e:
+            feed = []
+            print(f"[pindai] feed keterbukaan gagal: {e}", file=sys.stderr)
+        alarm = PP.alarm_penjual(penjual, feed) + PP.alarm_broker(rows)
+        d.update({"updated": datetime.now().strftime("%Y-%m-%d %H:%M"), "rows": rows, "riwayat": riw, "penjual": penjual,
+                  "alarm": alarm, "peta": PP.peta_grup(semua), "ringkasan": PP.ringkasan(rows, lalu, alarm)})
+        pindai_simpan(d)
+        return len(urut)
+    finally:
+        _pindai_jalan["aktif"] = False
+
+
+def pindai_loop() -> None:
+    """Pemindaian pertama 15 menit setelah start bila belum ada data, lalu tiap malam pukul 01.30 WIB."""
+    time.sleep(900)
+    while True:
+        try:
+            jam = datetime.now(WIB)
+            d = pindai_load()
+            lama = any(r.get("versi") != PD.VERSI for r in (d.get("rows") or {}).values())
+            if not d.get("updated") or lama or (jam.hour == 1 and jam.minute >= 30 and not str(d.get("updated", "")).startswith(jam.strftime("%Y-%m-%d"))):
+                n = pindai_jalan()
+                print(f"[pindai] {n} saham dipindai", file=sys.stderr)
+        except Exception as e:
+            print(f"[pindai] gagal: {e}", file=sys.stderr)
+        time.sleep(600)
+
+
+def pindai_api() -> dict:
+    d = pindai_load()
+    rows = sorted((d.get("rows") or {}).values(), key=lambda r: (-r["skor"], -r["skorArah"]))
+    ringan = [{k: v for k, v in r.items() if k not in ("jaringan", "jejakData")} for r in rows]
+    return {"updated": d.get("updated"), "rows": ringan, "alarm": d.get("alarm") or [], "peta": d.get("peta") or [],
+            "ringkasan": d.get("ringkasan") or {}, "penjual": d.get("penjual") or {}, "jalan": dict(_pindai_jalan),
+            "universe": len(pindai_universe())}
+
+
+def pov_dalam_api(t: str, mulai: bool) -> dict:
+    """Status/hasil analisa mendalam. Analisa tersimpan selalu ditampilkan; bila ada data baru sejak analisa itu
+    (field "basi"), mulai=True menarik ulang di latar sementara hasil lama tetap tampil (field "segarkan").
+    Tanpa analisa tersimpan, mulai=True memulai pekerjaan seperti biasa."""
+    pd_indeks()   # memecah format lama bila perlu
+    simpan = pd_baca(t)
+    if simpan and (simpan.get("hasil") or {}).get("versi") != PD.VERSI:
+        simpan = None
+    cakupan = pd_cakupan()
+    with _pd_lock:
+        job = _pd_jobs.get(t)
+        prog = ({**{k: job.get(k) for k in ("langkah", "total", "label", "estimasi")}, "berjalan": int(time.time() - job["mulai"])}
+                if job and job["status"] == "jalan" else None)
+        out = None
+        if simpan:
+            out = {"status": "selesai", "hasil": simpan["hasil"], "umur": int(time.time() - simpan["at"]), "cakupan": cakupan}
+            alasan = pd_basi(t, simpan)
+            if alasan:
+                out["basi"] = alasan
+            if prog:
+                return {**out, "segarkan": prog}
+            if job and job["status"] == "gagal":
+                out["galatSegar"] = job.get("galat")
+            if not (alasan and mulai):
+                return out
+        elif prog:
+            return {"status": "jalan", **prog, "cakupan": cakupan}
+        elif job and job["status"] == "gagal" and not mulai:
+            return {"status": "gagal", "galat": job.get("galat"), "cakupan": cakupan}
+        elif not mulai:
+            return {"status": "kosong", "cakupan": cakupan}
+        if not (get_token() and not token_expired()):
+            galat = "Token Stockbit server belum aktif; analisa belum bisa ditarik."
+            return {**out, "galatSegar": galat} if out else {"status": "gagal", "galat": galat, "cakupan": cakupan}
+        now = time.time()
+        _pd_mulai[:] = [x for x in _pd_mulai if now - x < 3600]
+        if (sum(1 for j in _pd_jobs.values() if j["status"] == "jalan" and not j.get("latar")) >= PD_MAKS_JALAN
+                or len(_pd_mulai) >= PD_MAKS_JAM):
+            galat = "Sedang ada analisa lain berjalan; coba lagi beberapa menit lagi."
+            return {**out, "galatSegar": galat} if out else {"status": "antre", "galat": galat, "cakupan": cakupan}
+        _pd_mulai.append(now)
+        _pd_jobs[t] = {"status": "jalan", "mulai": now, "langkah": 0, "total": 10, "label": "Memulai", "estimasi": 180}
+    threading.Thread(target=_pd_jalan, args=(t,), daemon=True, name=f"pov-dalam-{t}").start()
+    prog = {"langkah": 0, "total": 10, "label": "Memulai", "estimasi": 180, "berjalan": 0}
+    return {**out, "segarkan": prog} if out else {"status": "jalan", **prog, "cakupan": cakupan}
+
+
+# ------------------------------------------------------------------- POV ----
+# Sudut pandang (POV) akun Stockbit yang diprioritaskan + akun trending: saham yang mereka incar, gaya analisa,
+# horizon, dan nada (bullish/bearish). Hanya posting ide publik yang dianalisis; tidak ada data pribadi.
+
+# Urutan tampil kartu POV mengikuti daftar ini.
+POV_PRIORITY = ["athira", "majoindonangega", "zeinihzafahrozi", "PMFernandoR", "kakdr"]
+POV_PAGES, POV_DAYS, POV_TRENDING = 5, 60, 5
+POV_NOT_STOCK = {"IHSG", "LQ45", "IDXV", "IDXG", "JII7"}
+POV_STYLE = [
+    ("Teknikal", r"support|resist|breakout|break out|breakdown|\bma ?\d+|\bema\b|\brsi\b|macd|stoch|fibo|pola|pattern|candle|doji|hammer|trendline|channel|pullback|retest|double (top|bottom)|bollinger|volume|chart"),
+    ("Bandarmologi", r"bandar|broker|akumulasi|\bakum|distribusi|\bdistri|\basing\b|foreign|net ?buy|net ?sell|antri|order ?book|haka|haki|tektok|guyur|serok|mark ?up|goreng|big ?player|whale|\bbid\b|\boffer\b"),
+    ("Fundamental", r"laba|rugi|pendapatan|revenue|net ?profit|\bper\b|\bpbv\b|\broe\b|dividen|dividend|laporan keuangan|\blk\b|kinerja|margin|valuasi|undervalue|overvalue|cash ?flow|ekuitas|\beps\b"),
+    ("Aksi korporasi", r"right ?issue|\bri\b|hmetd|pmhmetd|pmthmetd|private placement|akuisisi|backdoor|back door|tender|\bmto\b|\bptw\b|inbreng|pengendali|\brups|stock split|buyback|merger|\bipo\b|cum ?date|ex ?date|waran"),
+    ("Momentum", r"\bara\b|\barb\b|scalp|day ?trade|fast ?trade|\bcuan|\btp\b|take profit|cut ?loss|\bcl\b|terbang|to the moon|nanjak|meroket|jebol|\bhit\b|\bgas\b"),
+    ("Makro & sentimen", r"ihsg|indeks|bi ?rate|suku bunga|the fed|\bfed\b|inflasi|rupiah|dolar|global|wall street|nasdaq|msci|sentimen|makro|komoditas|batu ?bara|nikel|\bcpo\b|emas"),
+]
+POV_HORIZON = [
+    ("jangka sangat pendek (scalping/harian)", r"scalp|day ?trade|fast ?trade|intraday|sesi \d|hari ini|besok"),
+    ("jangka pendek-menengah (swing)", r"swing|minggu|beberapa hari|short term|jangka pendek"),
+    ("jangka panjang (investasi)", r"jangka panjang|long term|value investing|dividen|tahunan|bertahun"),
+]
+POV_BULL = r"\bbuy\b|\bbeli|akum|\bhold|\btp\b|target|naik|breakout|rebound|bullish|serok|haka|mantap|\bgas\b|terbang|\bara\b|undervalue|cuan|reversal|uptrend|lanjut"
+POV_BEAR = r"\bjual|\bsell|\bcl\b|cut ?loss|distribusi|turun|breakdown|bearish|hindari|hati-hati|hati2|waspada|\barb\b|guyur|jebol|overvalue|keluar|downtrend|nyangkut|bubar"
+
+
+def stockbit_post_api(url: str, body: dict, fresh: bool = False) -> dict:
+    """POST ke API Stockbit (token Bearer) dengan cache seperti GET; kunci cache = URL + isi permintaan."""
+    token = get_token()
+    if not token:
+        raise NoToken()
+    key = url + "#" + json.dumps(body, sort_keys=True)
+
+    def fetch():
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
+            "Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
+            "Origin": "https://stockbit.com", "Referer": "https://stockbit.com/", "User-Agent": UA_BROWSER})
+        for i in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=40) as r:
+                    return r.read().decode("utf-8", "replace")
+            except urllib.error.HTTPError as e:
+                if e.code not in (502, 503, 504) or i == 2:
+                    raise
+                time.sleep(2 + 3 * i)
+    return json.loads(cached_text(key, fetch, fresh))
+
+
+def pov_posts_public(user: str, fresh: bool = False) -> list[dict]:
+    """Cadangan tanpa token: 30 posting terbaru dari endpoint publik Stockbit (untuk pengunjung belum login).
+    Bentuk datanya berbeda; diseragamkan ke kolom yang dipakai pov_user."""
+    url = f"https://exodus.stockbit.com/stream/non-login/user/{user}"
+    raw = cached_text(url, lambda: http_get(url, {"User-Agent": UA_BROWSER, "Accept": "application/json"}, 20), fresh)
+    out = []
+    for p in json.loads(raw).get("data") or []:
+        if str(p.get("replyto") or "0") not in ("0", "", "None"):
+            continue  # balasan, bukan ide utama
+        try:
+            topics = json.loads(p.get("topics") or "[]") if isinstance(p.get("topics"), str) else p.get("topics") or []
+        except ValueError:
+            topics = re.findall(r"\$([A-Z]{4})\b", str(p.get("content_original") or ""))
+        out.append({"stream_id": p.get("postid"), "created_at": p.get("created"), "content_original": p.get("content_original"),
+                    "content": p.get("content"), "topics": topics, "total_likes": p.get("likes"), "_pub": True})
+    return out
+
+
+def pov_posts(user: str, fresh: bool = False) -> list[dict]:
+    """Posting ide utama (bukan balasan) satu akun, terbaru dulu, maks. POV_PAGES halaman dalam POV_DAYS hari.
+    Bila endpoint bertoken ditolak (mis. 401), memakai cadangan publik (30 posting terbaru)."""
+    try:
+        return _pov_posts_token(user, fresh)
+    except Exception as e:
+        print(f"[pov] {user}: endpoint bertoken gagal ({e}); memakai endpoint publik", file=sys.stderr)
+        return pov_posts_public(user, fresh)
+
+
+def _pov_posts_token(user: str, fresh: bool = False) -> list[dict]:
+    cutoff = (datetime.now() - timedelta(days=POV_DAYS)).strftime("%Y-%m-%d")
+    out, cursor = [], 0
+    for _ in range(POV_PAGES):
+        j = stockbit_post_api(f"https://exodus.stockbit.com/stream/v3/user/{user}",
+                              {"category": "STREAM_CATEGORY_MAIN_IDEAS", "last_stream_id": cursor, "limit": 20}, fresh)
+        d = j.get("data") or {}
+        page = d.get("stream") or []
+        out += page
+        if not page or (d.get("pagination") or {}).get("is_last_page") or str(page[-1].get("created_at") or "")[:10] < cutoff:
+            break
+        cursor = (d.get("pagination") or {}).get("next_cursor") or page[-1].get("stream_id")
+        time.sleep(0.3)
+    return [p for p in out if str(p.get("created_at") or "")[:10] >= cutoff]
+
+
+_pov_prof_gagal: dict[str, float] = {}
+
+
+def pov_user(user: str, radar: set, fresh: bool = False) -> dict:
+    prof = {}
+    if time.time() - _pov_prof_gagal.get(user, 0) > 86400:
+        try:
+            prof = stockbit_api(f"https://exodus.stockbit.com/user/profile/{user}", fresh).get("data") or {}
+        except Exception:
+            _pov_prof_gagal[user] = time.time()   # mis. HTTP 404: pengikut diambil dari daftar trending bila ada
+    posts = pov_posts(user, fresh)
+    style = {k: 0 for k, _ in POV_STYLE}
+    hor = {k: 0 for k, _ in POV_HORIZON}
+    tick: dict = {}
+    likes, chars = 0, 0
+    latest = []
+    for p in posts:
+        txt = re.sub(r"\s+", " ", str(p.get("content_original") or p.get("content") or "")).strip()
+        low = txt.lower()
+        chars += len(txt)
+        likes += int(p.get("total_likes") or 0)
+        for k, rx in POV_STYLE:
+            if re.search(rx, low):
+                style[k] += 1
+        for k, rx in POV_HORIZON:
+            if re.search(rx, low):
+                hor[k] += 1
+        bull, bear = bool(re.search(POV_BULL, low)), bool(re.search(POV_BEAR, low))
+        day = str(p.get("created_at") or "")[:10]
+        for t in [x for x in (p.get("topics") or []) if TICKER_RE.match(str(x)) and x not in POV_NOT_STOCK]:
+            e = tick.setdefault(t, {"t": t, "n": 0, "bull": 0, "bear": 0, "last": day, "first": day, "calls": [], "sample": "", "url": ""})
+            e["n"] += 1
+            e["first"] = min(e["first"], day)
+            if len(e["calls"]) < 20:
+                e["calls"].append({"d": day, "s": "bull" if bull and not bear else "bear" if bear and not bull else "netral"})
+            e["bull"] += bull and not bear
+            e["bear"] += bear and not bull
+            e["last"] = max(e["last"], day)
+            if not e["sample"] and len(txt) >= 15:
+                e["sample"], e["url"] = txt[:220], f"https://stockbit.com/post/{p.get('stream_id')}"
+        if len(latest) < 5 and len(txt) >= 20:
+            latest.append({"d": day, "text": txt[:240], "topics": p.get("topics") or [], "url": f"https://stockbit.com/post/{p.get('stream_id')}"})
+    n = len(posts)
+    days = None
+    if n:
+        d0 = datetime.strptime(str(posts[-1]["created_at"])[:10], "%Y-%m-%d")
+        d1 = datetime.strptime(str(posts[0]["created_at"])[:10], "%Y-%m-%d")
+        days = max(1, (d1 - d0).days + 1)
+    tickers = sorted(tick.values(), key=lambda e: (-e["n"], e["t"]))
+    for e in tickers:
+        e["radar"] = e["t"] in radar
+        e["nada"] = "bullish" if e["bull"] > e["bear"] else "bearish" if e["bear"] > e["bull"] else "netral"
+    for e in tickers[:12]:
+        try:
+            e["track"] = pov_track(e, chart_prices(e["t"]))
+        except Exception:
+            e["track"] = None
+    st = sorted(({"k": k, "n": v, "pct": round(v / n * 100) if n else 0} for k, v in style.items()), key=lambda x: -x["n"])
+    hz = max(hor.items(), key=lambda x: x[1])
+    stats = prof.get("statistics") or {}
+    return {
+        "username": user, "url": f"https://stockbit.com/{user}", "followers": int(stats.get("follower_count") or 0),
+        "posts": n, "from": str(posts[-1]["created_at"])[:10] if n else None, "to": str(posts[0]["created_at"])[:10] if n else None,
+        "perDay": round(n / days, 1) if days else 0, "avgLikes": round(likes / n, 1) if n else 0, "avgChars": round(chars / n) if n else 0,
+        "styles": st, "horizon": hz[0] if hz[1] >= 3 else "", "tickers": tickers[:12], "latest": latest,
+        "radarHits": [e["t"] for e in tickers if e["radar"]],
+        "hit": pov_hit_rate(tickers[:12]),
+        # True = memakai cadangan publik (hanya posting terbaru), bukan riwayat 60 hari.
+        "terbatas": any(p.get("_pub") for p in posts),
+    }
+
+
+def pov_track(e: dict, prices: list[dict], target: float = 0.10, window: int = 20) -> dict | None:
+    """Uji panggilan akun: dari sebutan berarah pertama (bullish/bearish; bila tidak ada, sebutan pertama dianggap
+    bullish), apakah dalam `window` hari bursa harga lebih dulu bergerak +-`target` searah (hit) atau berlawanan (gagal)."""
+    if not prices:
+        return None
+    calls = sorted(e.get("calls") or [], key=lambda c: c["d"])
+    c0 = next((c for c in calls if c["s"] != "netral"), calls[0] if calls else {"d": e.get("first"), "s": "netral"})
+    arah = "bear" if c0["s"] == "bear" else "bull"
+    i0 = next((i for i, p in enumerate(prices) if p["d"] >= c0["d"]), None)
+    if i0 is None:
+        return None
+    p0, now = prices[i0]["v"], prices[-1]["v"]
+    seg = prices[i0 + 1:i0 + 1 + window]
+    status, hari = "belum", None
+    for k, p in enumerate(seg, 1):
+        r = p["v"] / p0 - 1
+        if (r >= target and arah == "bull") or (r <= -target and arah == "bear"):
+            status, hari = "hit", k
+            break
+        if (r <= -target and arah == "bull") or (r >= target and arah == "bear"):
+            status, hari = "gagal", k
+            break
+    if status == "belum" and len(seg) >= window:
+        status = "netral"  # jendela habis tanpa gerakan 10%
+    pk = max([p["v"] for p in seg] or [p0])
+    tr = min([p["v"] for p in seg] or [p0])
+    return {"d0": prices[i0]["d"], "arah": arah, "p0": p0, "now": now, "ret": round((now / p0 - 1) * 100, 1),
+            "peak": round((pk / p0 - 1) * 100, 1), "trough": round((tr / p0 - 1) * 100, 1), "status": status, "hari": hari}
+
+
+def pov_hit_rate(tickers: list[dict]) -> dict:
+    st = [((e.get("track") or {}).get("status")) for e in tickers]
+    h, g = st.count("hit"), st.count("gagal")
+    return {"hit": h, "gagal": g, "netral": st.count("netral"), "belum": st.count("belum"),
+            "rate": round(h / (h + g) * 100) if h + g else None}
+
+
+_pov_memo: tuple | None = None
+_pov_lock = threading.Lock()
+# Hasil POV terakhir juga disimpan ke disk: setelah restart (mis. deploy) halaman langsung tampil tanpa menunggu
+# perhitungan ulang yang memanggil Stockbit untuk tiap akun.
+POV_PATH = ROOT / ".pov.json"
+
+
+def _pov_dari_disk() -> tuple | None:
+    try:
+        d = json.loads(POV_PATH.read_text(encoding="utf-8"))
+        return (float(d["ts"]), d["res"]) if d.get("res", {}).get("users") else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _pov_ke_disk(ts: float, res: dict) -> None:
+    try:
+        tmp = POV_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"ts": ts, "res": res}, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(POV_PATH)
+    except OSError as e:
+        print(f"[pov] gagal simpan: {e}", file=sys.stderr)
+
+
+def get_pov(fresh: bool = False) -> dict:
+    """Hasil POV disimpan di memori (dihitung ulang tiap 6 jam oleh pov_loop); versi publik hanya membaca."""
+    global _pov_memo
+    if _pov_memo is None:
+        _pov_memo = _pov_dari_disk()
+    # Jalur baca tanpa kunci: pengunjung tidak ikut menunggu saat pov_loop sedang menghitung ulang.
+    m = _pov_memo
+    if m and (is_public_request() or (not fresh and time.time() - m[0] < 6 * 3600)):
+        return m[1]
+    if is_public_request():
+        return {"asOf": None, "users": [], "consensus": [], "errors": [{"source": "POV", "error": "Data POV sedang disiapkan."}]}
+    with _pov_lock:
+        if _pov_memo and (is_public_request() or (not fresh and time.time() - _pov_memo[0] < 6 * 3600)):
+            return _pov_memo[1]
+        if is_public_request():
+            return {"asOf": None, "users": [], "consensus": [], "errors": [{"source": "POV", "error": "Data POV sedang disiapkan."}]}
+        radar = {i["ticker"] for i in items_all()}
+        users, errors = [], []
+        trending, tfol = [], {}
+        try:
+            tl = stockbit_api("https://exodus.stockbit.com/user/trending?key=1W", fresh).get("data") or []
+            trending = [x["username"] for x in tl]
+            tfol = {x["username"]: int((x.get("statistics") or {}).get("follower_count") or 0) for x in tl}
+        except Exception as e:
+            errors.append({"source": "Trending", "error": str(e)[:120]})
+        names = POV_PRIORITY + [u for u in trending if u.lower() not in {p.lower() for p in POV_PRIORITY}][:POV_TRENDING]
+        for u in names:
+            try:
+                r = pov_user(u, radar, fresh)
+                r["priority"] = u in POV_PRIORITY
+                r["trending"] = u in trending
+                r["followers"] = r["followers"] or tfol.get(u, 0)
+                users.append(r)
+            except Exception as e:
+                errors.append({"source": u, "error": str(e)[:120]})
+        # Konsensus: saham yang dibahas oleh ≥2 akun.
+        agg: dict = {}
+        for u in users:
+            for e in u["tickers"]:
+                a = agg.setdefault(e["t"], {"t": e["t"], "users": [], "n": 0, "bull": 0, "bear": 0, "radar": e["radar"], "last": e["last"]})
+                a["users"].append(u["username"])
+                a["n"] += e["n"]
+                a["bull"] += e["bull"]
+                a["bear"] += e["bear"]
+                a["last"] = max(a["last"], e["last"])
+        cons = sorted((a for a in agg.values() if len(a["users"]) >= 2), key=lambda a: (-len(a["users"]), -a["n"]))
+        for a in cons:
+            a["nada"] = "bullish" if a["bull"] > a["bear"] else "bearish" if a["bear"] > a["bull"] else "netral"
+        res = {"asOf": datetime.now().isoformat(timespec="seconds"), "users": users, "consensus": cons[:20], "errors": errors}
+        # Hasil gagal total (mis. token kedaluwarsa) tidak menimpa hasil lama yang masih berguna.
+        if users or not _pov_memo:
+            _pov_memo = (time.time() if users else 0, res)
+            if users:
+                _pov_ke_disk(_pov_memo[0], res)
+        return _pov_memo[1] if not users and _pov_memo[1].get("users") else res
+
+
+# ------------------------------------------------------------- seasonality ----
+# Pola bulanan berulang IHSG, sektor, dan saham. Data mentah dikumpulkan mingguan ke .seasonality.json
+# (seasonality.build); permintaan pengunjung hanya membaca file itu, tanpa memanggil Stockbit.
+SEASON_PATH = ROOT / ".seasonality.json"
+_season_memo: tuple[float, dict] = (0.0, {})
+
+
+def season_data() -> dict:
+    global _season_memo
+    try:
+        m = SEASON_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _season_memo[0] != m:
+        _season_memo = (m, SZ.load(SEASON_PATH))
+    return _season_memo[1]
+
+
+def season_universe() -> list[str]:
+    """Saham yang dihitung: data tradersaham (likuid) + radar + kandidat, ditambah saham Pola Broker (akumulasi/
+    distribusi) dan saham berkapitalisasi >= Rp1 T dari Key Stats agar tetap lengkap tanpa token tradersaham."""
+    t = set(tsa_load("signals").keys()) | radar_tickers()
+    for b in (broker_data().get("broker") or {}).values():
+        for x in (b.get("bulan") or {}).values():
+            t |= {r["s"] for r in (x.get("beli") or []) + (x.get("jual") or [])}
+    besar = sorted(((v.get("mcap") or 0, k) for k, v in lks_load().items() if (v.get("mcap") or 0) >= 1e12), reverse=True)
+    t |= {k for _, k in besar[:400]}
+    return sorted(x for x in t if re.match(r"^[A-Z]{4}$", x))
+
+
+WIB = timezone(timedelta(hours=7))
+
+
+def season_next_run(now: datetime) -> datetime:
+    """Jadwal pembaruan: Senin-Sabtu pukul 00.01 WIB (Sabtu memuat data penutupan Jumat); Minggu libur."""
+    t = now.astimezone(WIB).replace(hour=0, minute=1, second=0, microsecond=0)
+    if t <= now.astimezone(WIB):
+        t += timedelta(days=1)
+    while t.weekday() == 6:  # 6 = Minggu
+        t += timedelta(days=1)
+    return t
+
+
+def jadwal_terlewat(path: Path, now: datetime) -> bool:
+    """Pembaruan terjadwal (00.01 WIB) sesudah berkas terakhir ditulis sudah lewat >10 menit, mis. server mati saat itu."""
+    try:
+        m = datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+    except OSError:
+        return False
+    return now > season_next_run(m) + timedelta(minutes=10)
+
+
+def season_build() -> None:
+    uni = season_universe()
+    print(f"[seasonality] membangun data {len(uni)} saham")
+    data = SZ.build(lambda p: sb_fetch(p), uni, log=lambda m: print(m, file=sys.stderr))
+    # Hasil gagal/kosong (mis. token ditolak) tidak disimpan agar dicoba lagi.
+    if "IHSG" not in data["index"] or len(data["stock"]) < min(20, len(uni) // 2):
+        raise RuntimeError(f"data tidak lengkap ({len(data['stock'])} saham)")
+    tmp = SEASON_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(SEASON_PATH)
+    print(f"[seasonality] selesai: {len(data['stock'])} saham")
+
+
+BROKER_PATH = ROOT / ".broker-pola.json"
+_broker_memo: tuple[float, dict] = (0.0, {})
+
+
+def broker_data() -> dict:
+    global _broker_memo
+    try:
+        m = BROKER_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _broker_memo[0] != m:
+        _broker_memo = (m, BP.load(BROKER_PATH))
+    return _broker_memo[1]
+
+
+BROKER_HARIAN_PATH = ROOT / ".broker-harian.json"
+BROKER_HARIAN_HARI = 20          # hari bursa yang disimpan/diisi ulang
+_broker_harian_memo: tuple = (None, {})
+
+
+def broker_harian_data() -> dict:
+    global _broker_harian_memo
+    try:
+        m = BROKER_HARIAN_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _broker_harian_memo[0] != m:
+        _broker_harian_memo = (m, BP.load(BROKER_HARIAN_PATH))
+    return _broker_harian_memo[1]
+
+
+def broker_daftar() -> dict:
+    """{kode: {jenis, nama}} dari data Pola Broker bulanan."""
+    return {c: {"jenis": b.get("jenis", ""), "nama": b.get("nama", "")} for c, b in (broker_data().get("broker") or {}).items()}
+
+
+def broker_harian_build() -> None:
+    """Pola Broker harian: net beli/jual tiap broker per hari bursa (20 hari terakhir). Hari ini hanya diambil setelah
+    16.45 WIB (data broker hari berjalan baru lengkap setelah bursa tutup); hari ini & kemarin selalu diperbarui."""
+    brokers = broker_daftar()
+    if len(brokers) < 20:
+        raise RuntimeError("daftar broker belum tersedia")
+    now = datetime.now(WIB)
+    akhir = now.date() if (now.hour, now.minute) >= (16, 45) else now.date() - timedelta(days=1)
+    dates, d = [], akhir
+    while len(dates) < BROKER_HARIAN_HARI:
+        if d.weekday() < 5:
+            dates.append(d.isoformat())
+        d -= timedelta(days=1)
+    fresh = set(dates[:2])
+    # Saat jam bursa hanya 2 hari terakhir (±180 panggilan) agar tidak menahan data Live; 20 hari penuh setelah bursa tutup.
+    if ihsg_jam_bursa():
+        dates = dates[:2]
+    def simpan(data: dict) -> None:
+        tmp = BROKER_HARIAN_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(BROKER_HARIAN_PATH)
+    # Disimpan tiap hari selesai (bukan hanya di akhir): restart server saat deploy tidak menghapus kemajuan.
+    simpan(BP.build_harian(lambda p, f=False: sb_fetch(p, f), broker_harian_data(), brokers, dates, fresh,
+                           pause=1.0, log=lambda m: print(m, file=sys.stderr), simpan=simpan))
+
+
+def broker_harian_loop() -> None:
+    """Isi awal 20 hari (sekali), lalu tiap hari bursa setelah 16.45 WIB dan sekali lagi setelah 19.30 WIB."""
+    time.sleep(240)
+    selesai = set()
+    while True:
+        try:
+            now = datetime.now(WIB)
+            kunci = None
+            if now.weekday() < 5 and (now.hour, now.minute) >= (19, 30):
+                kunci = now.strftime("%Y-%m-%d") + "b"
+            elif now.weekday() < 5 and (now.hour, now.minute) >= (16, 45):
+                kunci = now.strftime("%Y-%m-%d") + "a"
+            hd = broker_harian_data()
+            kurang = sum(1 for x in (hd.get("hari") or {}).values() if x.get("broker") or x.get("libur")) < BROKER_HARIAN_HARI
+            # Isi ulang bila data belum ada/versi lama/kurang dari 20 hari, paling sering tiap 2 jam.
+            awal = (not BROKER_HARIAN_PATH.exists() or hd.get("versi") != 2 or kurang) and time.time() - LIVE.get("harianIsiT", 0) > 7200
+            if get_token() and broker_data() and (awal or (kunci and kunci not in selesai)):
+                LIVE["harianIsiT"] = time.time()
+                broker_harian_build()
+                if kunci:
+                    selesai.add(kunci)
+        except Exception as e:
+            print(f"[broker-harian] gagal: {e}", file=sys.stderr)
+        time.sleep(600)
+
+
+def broker_build() -> None:
+    data = BP.build(lambda p: sb_fetch(p), BP.load(BROKER_PATH), log=lambda m: print(m, file=sys.stderr),
+                    insider=lambda t: [r for r in (insider_row(m) for m in insider_moves(t, 2)) if r])
+    if len(data.get("broker", {})) < 20:
+        raise RuntimeError(f"data broker tidak lengkap ({len(data.get('broker', {}))} broker)")
+    tmp = BROKER_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(BROKER_PATH)
+    print(f"[broker-pola] selesai: {len(data['broker'])} broker")
+
+
+RECOVERY_PATH = ROOT / ".recovery.json"
+
+
+def recovery_universe() -> list[str]:
+    """Saham Seasonality + saham yang muncul di akumulasi/distribusi Pola Broker (semua bulan)."""
+    uni = set((season_data().get("stock") or {}).keys())
+    for b in (broker_data().get("broker") or {}).values():
+        for x in (b.get("bulan") or {}).values():
+            uni |= {r["s"] for r in (x.get("beli") or []) + (x.get("jual") or [])}
+    return sorted(t for t in uni if re.match(r"^[A-Z]{4}$", t))
+
+
+def kinerja_panjang(t: str) -> dict:
+    """Kinerja 3Y/5Y/10Y dari deret harga penutupan Stockbit (timeframe terpanjang yang tersedia); periode yang
+    datanya tidak mencakup rentang itu dilewati (tidak ditebak)."""
+    out, deret = {}, []
+    for tf in ("10y", "5y", "3y"):
+        try:
+            res = sb_fetch(f"/charts/{t}/daily?timeframe={tf}")
+            pr = [(str(x["formatted_date"])[:10], float(x["value"])) for x in (res.get("data", {}).get("prices") or []) if x.get("formatted_date") and x.get("value")]
+        except Exception:
+            pr = []
+        if len(pr) > len(deret):
+            deret = sorted(pr)
+        if deret and deret[0][0] <= (datetime.now() - timedelta(days=365 * 9.5)).strftime("%Y-%m-%d"):
+            break
+    if not deret:
+        return out
+    akhir = deret[-1][1]
+    for label, th in (("3Y", 3), ("5Y", 5), ("10Y", 10)):
+        batas = (datetime.now() - timedelta(days=365 * th)).strftime("%Y-%m-%d")
+        lama = [v for d, v in deret if d <= batas]
+        if lama and lama[-1] and deret[0][0] <= batas:
+            out[label] = round((akhir / lama[-1] - 1) * 100, 2)
+    return out
+
+
+def recovery_build(delay: float = 0.25) -> None:
+    """Teknikal harian 1 tahun tiap saham untuk tab Recovery (dijalankan setelah Seasonality & Pola Broker)."""
+    out = {}
+    for t in recovery_universe():
+        try:
+            tek = RC.technical(get_ohlc(t, "1y"))
+            if tek:
+                out[t] = tek
+        except Exception as e:
+            if "401" in str(e):
+                raise
+        time.sleep(delay)
+    if not out:
+        raise RuntimeError("data teknikal kosong")
+    # Kinerja 3Y/5Y/10Y hanya untuk kategori "Sudah di dasar" (maks. 60 saham) agar panggilan Stockbit tetap hemat.
+    panjang = {}
+    for t in sorted((t for t, x in out.items() if RC.dasar(x)), key=lambda t: -out[t]["turun"])[:60]:
+        try:
+            kp = kinerja_panjang(t)
+            if kp:
+                panjang[t] = kp
+        except Exception as e:
+            if "401" in str(e):
+                break
+        time.sleep(delay)
+    data = {"updated": time.strftime("%Y-%m-%d %H:%M"), "tek": out, "panjang": panjang}
+    tmp = RECOVERY_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(RECOVERY_PATH)
+    print(f"[recovery] {len(out)} saham", file=sys.stderr)
+
+
+def recovery_ctx(month: int) -> tuple[dict, dict, int | None]:
+    """(baris Seasonality per kode untuk bulan terpilih, broker per kode bulan terakhir, bulan broker)."""
+    sea = season_api(month, 10)
+    srow = {x["t"]: x for x in sea.get("saham") or []}
+    # Broker: bulan terakhir yang ada; akumulasi = net bandar positif, distribusi = negatif.
+    bd = broker_data()
+    bro, bulan_b = {}, None
+    if bd:
+        v = BP.view(bd, None, None, "")
+        bulan_b = max(v.get("bulanAda") or [0]) or None
+        if bulan_b:
+            v = BP.view(bd, bulan_b, None, "")
+            BL = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+            for x in (v.get("saham") or {}).get("akumulasi") or []:
+                bro[x["s"]] = {"net": x["bandar"], "avg": x.get("avgAkum"), "bulanNama": BL[bulan_b - 1], "broker": [z["b"] for z in x.get("akum") or []]}
+            for x in (v.get("saham") or {}).get("distribusi") or []:
+                bro.setdefault(x["s"], {"net": x["bandar"], "avg": None, "dist": True, "bulanNama": BL[bulan_b - 1],
+                                        "broker": [z["b"] for z in x.get("dist") or []]})
+    return srow, bro, bulan_b
+
+
+def nama_saham(t: str, srow: dict | None = None) -> str:
+    """Nama perusahaan: baris Seasonality, data Seasonality lengkap, lalu snapshot tradersaham (signals/gems)."""
+    se = (srow or {}).get(t) or {}
+    return (se.get("nama") or ((season_data().get("stock") or {}).get(t) or {}).get("name")
+            or (tsa_load("signals").get(t) or {}).get("companyName") or (tsa_load("gems").get(t) or {}).get("stockName") or "")
+
+
+_nama_memo: tuple = (0.0, {})
+
+
+def nama_semua() -> dict:
+    """{kode: nama perusahaan} dari Seasonality + snapshot tradersaham (signals/gems); memo 30 menit."""
+    global _nama_memo
+    if time.time() - _nama_memo[0] < 1800 and _nama_memo[1]:
+        return _nama_memo[1]
+    out = {}
+    try:  # nama saham HSC (hsc.json) sebagai cadangan paling dasar
+        out.update(json.loads((ROOT / "hsc.json").read_text(encoding="utf-8")).get("nama") or {})
+    except (OSError, ValueError):
+        pass
+    for t, x in (tsa_load("gems") or {}).items():
+        if isinstance(x, dict) and x.get("stockName"):
+            out[t] = x["stockName"]
+    for t, x in (tsa_load("signals") or {}).items():
+        if isinstance(x, dict) and x.get("companyName"):
+            out[t] = x["companyName"]
+    for t, x in (season_data().get("stock") or {}).items():
+        if x.get("name"):
+            out[t] = x["name"]
+    _nama_memo = (time.time(), out)
+    return out
+
+
+_harga_memo: tuple = (None, {})
+
+
+def harga_semua() -> dict:
+    """{kode: {h: harga penutupan, d: %1D, w: %1W, m: %1M, y: %YTD, tgl}} semua saham terpantau dari data Recovery,
+    satu sumber harga yang sama untuk tab HSC, Pola Broker, Recovery, dan Low; memo per versi berkas."""
+    global _harga_memo
+    try:
+        m = RECOVERY_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _harga_memo[0] != m:
+        out = {}
+        for t, tek in (RC.load(RECOVERY_PATH).get("tek") or {}).items():
+            if tek.get("harga") and not tek.get("lompatan"):
+                r = tek.get("ret") or {}
+                out[t] = {"h": tek["harga"], "d": r.get("1D"), "w": r.get("1W"), "m": r.get("1M"), "y": r.get("YTD"), "tgl": tek.get("tanggal")}
+        _harga_memo = (m, out)
+    return _harga_memo[1]
+
+
+BLN_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(xs)
+    if not xs:
+        return None
+    n = len(xs)
+    return round(xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2, 2)
+
+
+def hsc_analisa() -> dict:
+    """Analisa dampak pengecualian saham HSC dari IHSG, dihitung dari data situs: harga & kinerja (data Recovery),
+    IHSG terakhir (Live), arus broker/asing bulan terakhir (Pola Broker), dan bobot estimasi di hsc.json."""
+    h = json.loads((ROOT / "hsc.json").read_text(encoding="utf-8"))
+    an = h.get("analisa") or {}
+    hs = set(h.get("kode") or [])
+    hg = harga_semua()
+    lv = LIVE.get("harga") or {}
+    b4 = an.get("bank4") or {}
+    ihsg = lv.get("harga") or b4.get("basis") or 0
+    per = [("d", "1D"), ("w", "1W"), ("m", "1M"), ("y", "YTD")]
+
+    # Arus broker bulan terakhir per saham (net bandar & porsi asing) dari Pola Broker.
+    arus, bulan_b = {}, None
+    bd = broker_data()
+    if bd:
+        bulan_b = max(BP.view(bd, None, None, "").get("bulanAda") or [0]) or None
+        if bulan_b:
+            s = BP.view(bd, bulan_b, None, "").get("saham") or {}
+            for x in (s.get("akumulasi") or []) + (s.get("distribusi") or []):
+                arus[x["s"]] = {"bandar": x["bandar"], "asing": x["asing"], "domestik": x["domestik"]}
+
+    # Penggerak baru: kinerja & kontribusi poin dengan bobot lama vs baru (poin = bobot% x ret% x IHSG).
+    pg = []
+    for x in an.get("penggerak") or []:
+        r = hg.get(x["t"]) or {}
+        ret = {k: r.get(k) for k, _ in per}
+        pg.append({**x, "harga": r.get("h"), "tgl": r.get("tgl"), "ret": ret, "arus": arus.get(x["t"]),
+                   "poin": {k: round(x["ke"] / 100 * v / 100 * ihsg, 1) if v is not None and ihsg else None for k, v in ret.items()},
+                   "poinLama": {k: round(x["dari"] / 100 * v / 100 * ihsg, 1) if v is not None and ihsg else None for k, v in ret.items()}})
+    kode4 = set(b4.get("kode") or [])
+    bank = [x for x in pg if x["t"] in kode4]
+    bobot4 = sum(x["ke"] for x in bank)
+    ret4 = {lbl: round(sum(x["ke"] * x["ret"][k] for x in bank) / bobot4, 2)
+            if bank and bobot4 and all(x["ret"][k] is not None for x in bank) else None for k, lbl in per}
+    sens = round(b4.get("ke", 0) / 100 * ihsg / 100, 1) if ihsg else None
+    skenario = [{"gerak": g, "poin": round(sens * g, 1), "level": round(ihsg + sens * g)} for g in (-3, -2, -1, 1, 2, 3)] if sens else []
+
+    # Keranjang HSC vs non-HSC: median kinerja, persentase saham naik, dan saham HSC paling turun/naik sebulan.
+    def keranjang(kode):
+        out = {}
+        for k, lbl in per:
+            v = [hg[t][k] for t in kode if t in hg and hg[t].get(k) is not None]
+            out[lbl] = {"median": _median(v), "naik": round(sum(1 for z in v if z > 0) / len(v) * 100) if v else None, "n": len(v)}
+        return out
+    kh, kn = keranjang(hs), keranjang(set(hg) - hs)
+    hm = sorted((t for t in hs if t in hg and hg[t].get("m") is not None), key=lambda t: hg[t]["m"])
+    gerak = lambda ts: [{"t": t, "m": hg[t]["m"], "h": hg[t]["h"]} for t in ts]
+    asing_hsc = sum(arus[t]["asing"] for t in hs if t in arus)
+
+    # Kesimpulan otomatis dari angka di atas (nada objektif: naik/turun/netral beserta alasannya).
+    ks = []
+    f = lambda v, n=1: f"{v:+.{n}f}".replace(".", ",")
+    if ret4.get("1W") is not None and sens:
+        p = round(ret4["1W"] * sens, 1)
+        ks.append({"nada": "naik" if p > 0 else "turun" if p < 0 else "netral",
+                   "teks": f"Big-4 bank bergerak {f(ret4['1W'])}% sepekan (tertimbang bobot baru); dengan bobot {str(b4.get('ke')).replace('.', ',')}% "
+                           f"setara {f(p)} poin IHSG. Arah IHSG ex-HSC akan sangat mengikuti saham bank."})
+    a4 = [x["arus"]["asing"] for x in bank if x.get("arus")]
+    if a4:
+        tot = sum(a4)
+        ks.append({"nada": "naik" if tot > 0 else "turun",
+                   "teks": f"Asing net {'beli' if tot > 0 else 'jual'} big-4 bank Rp{abs(tot) / 1e9:,.1f} M pada {BLN_ID[bulan_b - 1]} (Pola Broker)"
+                           .replace(",", "X").replace(".", ",").replace("X", ".") +
+                           ("; mendukung catatan foreign flow negatif." if tot < 0 else "; berbeda dengan catatan foreign flow negatif.")})
+    mh, mn = kh["1M"]["median"], kn["1M"]["median"]
+    if mh is not None and mn is not None:
+        lebih = mh < mn
+        ks.append({"nada": "naik" if lebih else "turun",
+                   "teks": f"Secara median (bobot sama), saham HSC sebulan {f(mh)}% vs non-HSC {f(mn)}%: " +
+                           ("saham HSC pada umumnya turun lebih dalam. Dampaknya ke IHSG tetap bergantung pada saham HSC berkapitalisasi besar "
+                            "(lihat estimasi IHSG tanpa HSC)." if lebih else
+                            "saham HSC pada umumnya lebih kuat. Dampaknya ke IHSG tetap bergantung pada saham HSC berkapitalisasi besar "
+                            "(lihat estimasi IHSG tanpa HSC).")})
+    if kh["1D"]["naik"] is not None:
+        ks.append({"nada": "netral", "teks": f"Hari terakhir: {kh['1D']['naik']}% saham HSC naik vs {kn['1D']['naik']}% saham non-HSC."})
+
+    # Estimasi IHSG tanpa HSC per periode: IHSG = (1 - w) x ex-HSC + w x HSC, dengan HSC diwakili median keranjang
+    # (proksi bobot sama karena kapitalisasi tiap saham tidak tersedia) -> ex-HSC = (IHSG - w x HSC) / (1 - w).
+    w = (an.get("bobotHsc") or 18) / 100
+    try:
+        cl = [b["c"] for b in ihsg_bars() if b.get("c")]
+    except Exception:
+        cl = []
+    tahun = None
+    try:
+        bars = ihsg_bars()
+        tahun = str(bars[-1]["d"])[:4] if bars else None
+        akhir_lalu = [b["c"] for b in bars if str(b["d"])[:4] < tahun] if tahun else []
+    except Exception:
+        akhir_lalu = []
+    ret_ihsg = {}
+    for lbl, n in (("1D", 1), ("1W", 5), ("1M", 21)):
+        if len(cl) > n and cl[-1 - n]:
+            ret_ihsg[lbl] = round((cl[-1] / cl[-1 - n] - 1) * 100, 2)
+    if cl and akhir_lalu:
+        ret_ihsg["YTD"] = round((cl[-1] / akhir_lalu[-1] - 1) * 100, 2)
+    exhsc = []
+    for lbl in ("1D", "1W", "1M", "YTD"):
+        ri, rh = ret_ihsg.get(lbl), kh[lbl]["median"]
+        if ri is None or rh is None:
+            continue
+        ex = round((ri - w * rh) / (1 - w), 2)
+        exhsc.append({"periode": lbl, "ihsg": ri, "hsc": rh, "ex": ex, "selisih": round(ex - ri, 2)})
+    if exhsc:
+        m1 = next((x for x in exhsc if x["periode"] == "1M"), exhsc[-1])
+        ks.append({"nada": "naik" if m1["selisih"] > 0 else "turun" if m1["selisih"] < 0 else "netral",
+                   "teks": f"Estimasi: tanpa HSC, IHSG {m1['periode']} bergerak {f(m1['ex'])}% dibanding aktual {f(m1['ihsg'])}% "
+                           f"(selisih {f(m1['selisih'])} poin persen)."})
+
+    # Sektor saham HSC (indeks sektoral IDX dari data Seasonality): jumlah emiten dan median kinerja 1M.
+    stock = season_data().get("stock") or {}
+    sek: dict[str, list] = {}
+    for t in hs:
+        ix = (stock.get(t) or {}).get("ix") or []
+        nm = SZ.SECTORS.get(ix[0], "") if ix else ""
+        sek.setdefault(nm or "Lainnya", []).append(t)
+    sektor = sorted(({"sektor": k, "n": len(v), "kode": sorted(v),
+                      "m": _median([hg[t]["m"] for t in v if t in hg and hg[t].get("m") is not None])} for k, v in sek.items()),
+                    key=lambda x: (-x["n"], x["sektor"]))
+
+    # Arus asing per saham HSC bulan terakhir: net beli & net jual terbesar.
+    ah = sorted(((t, arus[t]["asing"]) for t in hs if t in arus), key=lambda z: z[1])
+    asing_beli = [{"t": t, "asing": v} for t, v in ah[::-1][:5] if v > 0]
+    asing_jual = [{"t": t, "asing": v} for t, v in ah[:5] if v < 0]
+
+    # Sensitivitas: poin IHSG per 1% gerak tiap penggerak (bobot baru).
+    for x in pg:
+        x["sens"] = round(x["ke"] / 100 * ihsg / 100, 1) if ihsg else None
+
+    # Narasi per bagian (dari angka di atas).
+    narasi = []
+    narasi.append({"judul": "Apa yang berubah", "teks":
+                   f"Saham HSC berbobot sekitar {an.get('bobotHsc') or 18}% keluar dari IHSG; bobotnya terbagi ke saham lain sehingga "
+                   f"big-4 bank naik dari {str(b4.get('dari')).replace('.', ',')}% ke {str(b4.get('ke')).replace('.', ',')}%. Level indeks tidak "
+                   f"melompat karena divisor disesuaikan; yang berubah adalah siapa yang menggerakkan indeks."})
+    if ret4.get("1M") is not None and sens:
+        narasi.append({"judul": "Dampak ke pergerakan harian", "teks":
+                       f"Dengan bobot baru, setiap 1% gerak big-4 bank menggeser IHSG sekitar {str(sens).replace('.', ',')} poin. "
+                       f"Sebulan terakhir big-4 bank bergerak {f(ret4['1M'])}% (setara {f(round(ret4['1M'] * sens, 1))} poin). "
+                       f"Penggerak terbesar sepekan: " + ", ".join(f"{x['t']} {f(x['poin']['w'])} poin" for x in
+                                                                     sorted(pg, key=lambda x: -abs(x['poin']['w'] or 0))[:3]) + "."})
+    if a4:
+        narasi.append({"judul": "Arus dana", "teks":
+                       f"Asing net {'beli' if sum(a4) > 0 else 'jual'} big-4 bank Rp{abs(sum(a4)) / 1e12:.2f} T pada {BLN_ID[bulan_b - 1]}".replace(".", ",") +
+                       (f"; pada saham HSC asing net {'beli' if asing_hsc > 0 else 'jual'} Rp{abs(asing_hsc) / 1e9:,.1f} M".replace(",", "X").replace(".", ",").replace("X", ".") if arus else "") +
+                       ". Karena IHSG makin bergantung pada bank, arah asing di saham bank menjadi penentu utama."})
+    lv2 = lambda v: f"{round(v):,}".replace(",", ".")
+    pantau = [f"Big-4 bank turun 2% setara {f(round(-2 * sens, 1))} poin (IHSG sekitar {lv2(ihsg - 2 * sens)}); naik 2% setara "
+              f"{f(round(2 * sens, 1))} poin (sekitar {lv2(ihsg + 2 * sens)})." if sens else None,
+              "Rupiah dan arus asing di saham bank (BBCA, BBRI, BMRI, BBNI).",
+              "Publikasi bobot resmi BEI setelah 2 November untuk mengganti estimasi bobot.",
+              "Evaluasi HSC berikutnya (Januari 2027): saham yang keluar dari daftar akan kembali dihitung dalam IHSG."]
+    narasi.append({"judul": "Yang perlu dipantau", "poin": [p for p in pantau if p]})
+
+    return {"ihsg": ihsg, "ihsgWaktu": lv.get("waktu"), "ihsgSumber": "Live" if lv.get("harga") else "basis sumber",
+            "bobotHsc": an.get("bobotHsc"), "bank4": {**b4, "ret": ret4, "sens": sens}, "penggerak": pg, "skenario": skenario,
+            "keranjang": {"hsc": kh, "non": kn}, "terburuk": gerak(hm[:5]), "terbaik": gerak(hm[-5:][::-1]),
+            "sorot": gerak([t for t in ("BREN", "BYAN", "DSSA") if t in hg]),
+            "exHsc": exhsc, "retIhsg": ret_ihsg, "sektor": sektor, "asingBeli": asing_beli, "asingJual": asing_jual, "narasi": narasi,
+            "asingHsc": asing_hsc if arus else None, "bulanBroker": BLN_ID[bulan_b - 1] if bulan_b else None, "kesimpulan": ks,
+            "updated": next((v["tgl"] for v in hg.values() if v.get("tgl")), None)}
+
+
+def recovery_api(month: int) -> dict:
+    """Saham turun >= 30% dari puncak 52 minggu, diberi skor dukungan Seasonality (bulan terpilih) & Pola Broker."""
+    rd = RC.load(RECOVERY_PATH)
+    if not rd.get("tek"):
+        return {"error": "Data Recovery sedang disiapkan (pembaruan otomatis Senin-Sabtu pukul 00.01 WIB). Coba lagi beberapa menit lagi."}
+    srow, bro, bulan_b = recovery_ctx(month)
+    rows = []
+    for t, tek in rd["tek"].items():
+        # Hanya yang sudah turun dalam, masih dekat dasar kejatuhan, dan tanpa lompatan harga akibat aksi korporasi.
+        if tek["turun"] < RC.MIN_TURUN or tek["dariDasar"] > RC.MAX_DARI_DASAR or tek.get("lompatan"):
+            continue
+        se, b = srow.get(t), bro.get(t)
+        sc = RC.score(tek, se, b)
+        rows.append({"t": t, "nama": nama_saham(t, srow), "sektorNama": (se or {}).get("sektorNama") or "",
+                     "radar": (se or {}).get("radar") or "", "tek": tek,
+                     "season": {k: se[k] for k in ("n", "up", "prob", "median", "worst")} if se else None,
+                     "broker": b, "plan": RC.plan(tek, (b or {}).get("avg") if b and not b.get("dist") else None), **sc})
+    # Didukung lebih banyak (Seasonality, broker, teknikal) lebih dulu, lalu skor.
+    rows.sort(key=lambda r: (-len(r["dukung"]), -r["skor"]))
+    # Kategori "Recovery tercepat": kandidat dengan momentum pulih (skor kecepatan) dan perkiraan hari ke target 1.
+    for r in rows:
+        r["cepat"] = RC.kecepatan(r["tek"], r["plan"])
+    cepat = sorted((r for r in rows if r["cepat"]["estimasiHari"] and r["cepat"]["skor"] >= 50),
+                   key=lambda r: (r["cepat"]["estimasiHari"], -r["cepat"]["skor"]))[:40]
+    # Kategori "Sudah di dasar": seluruh saham terpantau (tidak harus lolos filter kandidat rebound).
+    pj = rd.get("panjang") or {}
+    dasar = []
+    for t, tek in rd["tek"].items():
+        if not RC.dasar(tek):
+            continue
+        se = srow.get(t)
+        dasar.append({"t": t, "nama": nama_saham(t, srow), "sektorNama": (se or {}).get("sektorNama") or "", "radar": (se or {}).get("radar") or "",
+                      "tek": tek, "ret": {**(tek.get("ret") or {}), **pj.get(t, {})}, "broker": bro.get(t), "potensi": RC.potensi(tek)})
+    dasar.sort(key=lambda r: -r["tek"]["turun"])
+    # Tab "Low per periode": kinerja per periode semua saham terpantau (ringkas) untuk saringan low 1D..10Y di peramban.
+    low = [{"t": t, "nama": nama_saham(t, srow), "harga": tek.get("harga"), "turun": tek.get("turun"),
+            "dariRendah": tek.get("dariRendah"), "ret": {**(tek.get("ret") or {}), **pj.get(t, {})}, "potensi": RC.potensi(tek)}
+           for t, tek in rd["tek"].items() if tek.get("ret") and not tek.get("lompatan")]
+    return {"updated": rd["updated"], "bulan": month, "bulanBroker": bulan_b, "minTurun": RC.MIN_TURUN, "maxDariDasar": RC.MAX_DARI_DASAR,
+            "dasarTurun": RC.DASAR_TURUN, "dasarJarak": RC.DASAR_JARAK, "skemaLama": not any("ret" in x for x in list(rd["tek"].values())[:5]),
+            "total": len(rd["tek"]), "saham": rows, "cepat": [r["t"] for r in cepat], "dasar": dasar[:80], "low": low}
+
+
+def saham_detail(t: str, month: int) -> dict:
+    """Rincian satu saham untuk panel klik di Seasonality, Pola Broker, dan Recovery: alasan (turun/dasar, Seasonality,
+    broker, teknikal), komponen skor, trading plan Seasonality (bila ada) dan plan rebound (bila turun >= 30%)."""
+    rd = RC.load(RECOVERY_PATH)
+    tek = (rd.get("tek") or {}).get(t)
+    if not tek:
+        try:
+            tek = RC.technical(get_ohlc(t, "1y"))
+        except Exception:
+            tek = None
+    srow, bro, bulan_b = recovery_ctx(month)
+    se, b = srow.get(t), bro.get(t)
+    out = {"t": t, "bulan": month, "bulanBroker": bulan_b, "season": None, "broker": b, "tek": tek,
+           "planSeason": (se or {}).get("plan"), "planRebound": None, "updated": rd.get("updated")}
+    if se:
+        out["season"] = {k: se.get(k) for k in ("n", "up", "prob", "median", "worst", "best", "skor", "sektorNama", "nama", "radar")}
+    if not tek:
+        out["alasan"] = ["Data harga harian belum tersedia."]
+        return out
+    sc = RC.score(tek, se, b)
+    out.update(alasan=sc["alasan"], komponen=sc["komponen"], status=sc["status"], dukung=sc["dukung"], skor=sc["skor"])
+    if tek["turun"] >= RC.MIN_TURUN and tek["dariDasar"] <= RC.MAX_DARI_DASAR and not tek.get("lompatan"):
+        out["planRebound"] = RC.plan(tek, (b or {}).get("avg") if b and not b.get("dist") else None)
+    return out
+
+
+HARMONIK_PATH = ROOT / ".harmonik.json"
+
+
+def harmonik_universe() -> tuple[list[str], set[str]]:
+    """Saham yang dipindai Harmonic: universe Recovery ditambah semua kode BEI yang dikenal, supaya tidak ada saham yang
+    terlewat (sebelumnya sekitar 150 kode BEI di luar Seasonality/Pola Broker tidak pernah dipindai). Kembali juga
+    himpunan Recovery, karena ringkasan momentum Rekomendasi tetap hanya untuk universe itu."""
+    rec = set(recovery_universe())
+    bei = {t for t in bei_kode_load() if re.match(r"^[A-Z]{4}$", t)}
+    return sorted(rec | bei), rec
+
+
+def harmonik_build(delay: float = 0.25) -> None:
+    """Screening Harmonic Pattern (POV) atas universe Recovery plus semua kode BEI memakai bar harian 1 tahun yang
+    sama (cache), sehingga dijalankan tepat setelah recovery_build dengan sedikit panggilan Stockbit tambahan."""
+    rows, dinilai, simpan, mom = [], 0, {}, {}
+    now = datetime.now(WIB)
+    hari_ini, buka = now.strftime("%Y-%m-%d"), now.hour < 16
+    semua, rec = harmonik_universe()
+    for t in semua:
+        try:
+            bars = get_ohlc(t, "1y")
+        except Exception as e:
+            # Token mati menghentikan screening hanya untuk universe Recovery (yang biasanya sudah ada di cache);
+            # kode BEI tambahan yang gagal diambil cukup dilewati supaya hasil lain tetap tersimpan.
+            if "401" in str(e) and t in rec:
+                raise
+            continue
+        if bars:
+            dinilai += 1
+            hasil = HM.cari(bars)
+            rows += [{"t": t, **r} for r in hasil]
+            if hasil:
+                # Salinan bar untuk chart analisa (dipakai bila cache harga kosong, mis. pengunjung publik).
+                simpan[t] = [{k: b[k] for k in ("d", "o", "h", "l", "c", "v")} for b in bars[-HM.BAR_SIMPAN:]]
+            # Ringkasan momentum saham universe Recovery untuk Rekomendasi (tanpa candle hari ini yang belum selesai).
+            bb = [b for b in bars if not (buka and str(b.get("d"))[:10] == hari_ini)] if t in rec else []
+            try:
+                m = RK.momentum(bb) if bb else None
+                if m:
+                    mom[t] = {**m, "res": RK.resistensi(bb[-HM.BAR_SIMPAN:]), "l5": min(x["l"] for x in bb[-5:]),
+                              "l20": min(x["l"] for x in bb[-20:]), "c": bb[-1]["c"]}
+            except (KeyError, TypeError, ValueError):
+                pass
+        time.sleep(delay)
+    if not dinilai:
+        raise RuntimeError("data harga kosong")
+    data = {"updated": time.strftime("%Y-%m-%d %H:%M"), "versi": HM.VERSI_ATURAN, "versiMomentum": RK.VERSI, "dinilai": dinilai,
+            "rows": rows, "bars": simpan, "momentum": mom}
+    tmp = HARMONIK_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(HARMONIK_PATH)
+    print(f"[harmonik] {len(rows)} pola dari {dinilai} saham", file=sys.stderr)
+
+
+def harmonik_load() -> dict:
+    try:
+        return json.loads(HARMONIK_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def harmonik_saham(t: str) -> dict:
+    """Analisa Harmonic Pattern satu saham BEI mana pun: bar harian 1 tahun (Stockbit/cache; cadangan salinan dari
+    screening malam), pola aktif tanpa saringan likuiditas (ditandai), dan pivot swing terakhir untuk chart."""
+    simpan = (harmonik_load().get("bars") or {}).get(t)
+    try:
+        bars, sumber = get_ohlc(t, "1y"), "harga harian Stockbit"
+    except Exception:
+        if not simpan:
+            raise
+        bars, sumber = simpan, "salinan screening malam"
+    if not bars:
+        bars, sumber = simpan or [], "salinan screening malam"
+    nilai = HM.nilai_rata(bars)
+    pv = HM.zigzag(bars, HM.SKALA[0]) if bars else []
+    return {"t": t, "nama": nama_semua().get(t, ""), "sumber": sumber, "bars": bars[-HM.BAR_SIMPAN:],
+            "rows": HM.cari(bars, min_nilai=0), "nilai": round(nilai), "likuid": nilai >= HM.MIN_NILAI,
+            "minNilai": HM.MIN_NILAI, "pivot": [{"d": bars[x["i"]]["d"][:10], "p": x["p"], "k": x["k"], "tentatif": bool(x.get("tentatif"))}
+                                              for x in pv[-8:]],
+            "pola": HM.ringkas_pola()}
+
+
+def harmonik_usang() -> bool:
+    """Hasil screening tersimpan dibuat dengan aturan pemindai lain (versi berbeda atau hasil lama tanpa versi), atau
+    belum berisi ringkasan momentum versi Rekomendasi yang berlaku."""
+    if not HARMONIK_PATH.exists():
+        return False
+    d = harmonik_load()
+    return d.get("versi") != HM.VERSI_ATURAN or d.get("versiMomentum") != RK.VERSI
+
+
+def harmonik_api() -> dict:
+    d = harmonik_load()
+    nama, radar = nama_semua(), radar_tickers()
+    urut = {"prz": 0, "berbalik": 1, "menuju": 2}
+    rows = sorted(d.get("rows") or [], key=lambda r: (urut.get(r["status"], 3), r.get("jarak") or 0))
+    for r in rows:
+        r["nama"] = nama.get(r["t"], "")
+        r["radar"] = r["t"] in radar
+    return {"updated": d.get("updated"), "versi": d.get("versi"), "dinilai": d.get("dinilai", 0), "rows": rows, "pola": HM.ringkas_pola(),
+            "minNilai": HM.MIN_NILAI}
+
+
+# ---------------------------------------------------------------- Rekomendasi ----
+REKO_PATH = ROOT / ".rekomendasi.json"
+REKO_BATAS = 2000   # harga maksimal saham yang direkomendasikan
+REKO_JUMLAH = 5     # jumlah saham per kelompok (Non HSC dan HSC)
+_reko_lock = threading.Lock()
+
+
+def broksum_hari(hari: int = 5) -> dict:
+    """Broksum harian `hari` hari bursa terakhir: net bandar per saham (jumlah dari daftar akumulasi/distribusi harian),
+    jumlah hari akumulasi, dan net hari terakhir."""
+    hd = broker_harian_data()
+    ada = sorted((d for d, x in (hd.get("hari") or {}).items() if x.get("broker")), reverse=True)[:hari]
+    br, out = broker_daftar(), {}
+    for tg in ada:
+        v = BP.view_harian(hd, tg, br, "").get("saham") or {}
+        for x in (v.get("akumulasi") or []) + (v.get("distribusi") or []):
+            o = out.setdefault(x["s"], {"net": 0, "hariAkum": 0, "kemarin": None})
+            o["net"] += x["bandar"]
+            o["hariAkum"] += x["bandar"] > 0
+            if tg == ada[0]:
+                o["kemarin"] = x["bandar"]
+    return {"tanggal": ada, "saham": out}
+
+
+def rekomendasi_kumpul() -> tuple[dict, dict]:
+    """Bahan rekomendasi dari berkas lokal saja (tanpa panggilan Stockbit): hasil screening, Monitor, memo Kandidat,
+    skor backdoor POV-Dalam, dan kurasi. Sumber yang gagal dilewati; (src, jumlah baris per sumber)."""
+    m = datetime.now(WIB).month
+    src: dict = {"bulan": m}
+    n: dict = {}
+
+    def ambil(kunci, fn):
+        try:
+            src[kunci] = fn()
+        except Exception as e:
+            print(f"[rekomendasi] {kunci} dilewati: {e}", file=sys.stderr)
+            src[kunci] = None
+        v = src[kunci]
+        n[kunci] = len(v) if isinstance(v, (list, dict)) else 0
+
+    ambil("harga", harga_semua)
+    ambil("nama", nama_semua)
+    ambil("harmonik", lambda: harmonik_load().get("rows") or [])
+    ambil("recovery", lambda: recovery_api(m).get("saham") or [])
+    ambil("seasonality", lambda: season_api(m, 10).get("saham") or [])
+
+    def broker():
+        bd = broker_data()
+        if not bd:
+            return {}
+        bulan = max(BP.view(bd, None, None, "").get("bulanAda") or [0]) or None
+        if not bulan:
+            return {}
+        v = (BP.view(bd, bulan, None, "").get("saham") or {})
+        return {"bulan": bulan, "akumulasi": v.get("akumulasi") or [], "distribusi": v.get("distribusi") or []}
+    ambil("broker", broker)
+    ambil("lk", lambda: lk_api_cache().get("rows") or [])
+    ambil("saham50", lambda: saham50_api().get("rows") or [])
+    ambil("kakdr", lambda: kakdr_screen().get("rows") or [])
+    ambil("momentum", lambda: harmonik_load().get("momentum") or {})
+    if not src["momentum"]:   # berkas Harmonic lama tanpa ringkasan momentum: pakai bar yang tersimpan saja
+        ambil("bars", lambda: harmonik_load().get("bars") or {})
+    ambil("broksum", broksum_hari)
+    ambil("items", items_all)
+    ambil("kandidat", lambda: (_kd_memo[1].get("items") or []) if _kd_memo else [])
+
+    def pd_semua():
+        out = {}
+        for f in PD_DIR.glob("*.json"):
+            sk = ((((pd_baca(f.stem) or {}).get("hasil") or {}).get("backdoor")) or {}).get("skor")
+            if sk is not None:
+                out[f.stem] = sk
+        return out
+    ambil("backdoor_pd", pd_semua)
+    ambil("pengendali", lambda: _json_berkas("pengendali-verified.json"))
+    ambil("sikap", lambda: {t: v.get("sikap") for t, v in _json_berkas("pandangan-analis.json").items() if isinstance(v, dict)})
+    ambil("hsc", lambda: json.loads((ROOT / "hsc.json").read_text(encoding="utf-8")).get("kode") or [])
+    return src, n
+
+
+def rekomendasi_build() -> dict:
+    """Hitung rekomendasi hari ini (REKO_JUMLAH saham Non HSC dan HSC terbaik di bawah REKO_BATAS) dan simpan ke
+    .rekomendasi.json."""
+    src, n = rekomendasi_kumpul()
+    res = RK.nilai(src, REKO_BATAS, REKO_JUMLAH)
+    now = datetime.now(WIB)
+    res.update({"tanggal": now.strftime("%Y-%m-%d"), "updated": now.strftime("%Y-%m-%d %H:%M"), "sumber": n,
+                "harmonikUpdated": harmonik_load().get("updated")})
+    tmp = REKO_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(REKO_PATH)
+    return res
+
+
+def rekomendasi_api() -> dict:
+    """Rekomendasi hari ini; dihitung ulang bila berkas belum ada, masih tanggal kemarin, versi aturannya lama, atau hasil
+    pemindaian Harmonic (sumber pola dan momentum) sudah diperbarui sejak terakhir dihitung."""
+    hari = datetime.now(WIB).strftime("%Y-%m-%d")
+    try:
+        d = json.loads(REKO_PATH.read_text(encoding="utf-8"))
+        if d.get("tanggal") == hari and d.get("versi") == RK.VERSI and d.get("harmonikUpdated") == harmonik_load().get("updated"):
+            return d
+    except (OSError, ValueError):
+        pass
+    with _reko_lock:
+        try:
+            d = json.loads(REKO_PATH.read_text(encoding="utf-8"))
+            if d.get("tanggal") == hari and d.get("versi") == RK.VERSI and d.get("harmonikUpdated") == harmonik_load().get("updated"):
+                return d
+        except (OSError, ValueError):
+            pass
+        return rekomendasi_build()
+
+
+AUDIT_PATH = ROOT / ".audit-monitor.json"
+
+
+def audit_monitor_build() -> dict:
+    """Audit harian Monitor: tonggak tiap item dicocokkan dengan daftar tender offer Stockbit dan judul keterbukaan/berita
+    emiten itu. Hasilnya daftar "perlu dicek" untuk tim; data tim tidak diubah."""
+    items = [it for it in items_all() if it.get("ticker")]
+    batas = (datetime.now(WIB) - timedelta(days=90)).strftime("%Y-%m-%d")
+    tenders, galat = {}, []
+    try:
+        for x in tender_data(load_config()).get("items") or []:
+            # Tender offer lama (berakhir > 90 hari lalu) milik transaksi sebelumnya, tidak dipakai sebagai bukti.
+            if x.get("start") and (x.get("end") or "") >= batas:
+                tenders[x["ticker"]] = x
+    except Exception as e:
+        galat.append(f"tender offer: {e}"[:160])
+    laporan = {}
+    for it in items:
+        t = it["ticker"]
+        b = berita_saham(t)
+        if b.get("error") and not b.get("items"):
+            galat.append(f"{t}: {b['error']}"[:160])
+        laporan[t] = [{"date": str(x.get("date") or ""), "title": str(x.get("title") or ""), "source": str(x.get("source") or "")}
+                      for x in b.get("items") or []]
+        time.sleep(0.3)
+    now = datetime.now(WIB)
+    res = {"tanggal": now.strftime("%Y-%m-%d"), "updated": now.strftime("%Y-%m-%d %H:%M"), "jumlahItem": len(items),
+           "temuan": AD.audit_monitor(items, tenders, laporan, now.strftime("%Y-%m-%d")), "galat": galat[:20]}
+    tmp = AUDIT_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(res, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(AUDIT_PATH)
+    print(f"[audit-monitor] {len(res['temuan'])} temuan dari {len(items)} item", file=sys.stderr)
+    return res
+
+
+def audit_monitor_api() -> dict:
+    """Hasil audit terakhir. Temuan untuk item yang sudah dihapus dari Monitor tidak ditampilkan lagi."""
+    try:
+        d = json.loads(AUDIT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"temuan": [], "updated": None}
+    ada = {it.get("ticker") for it in items_all()}
+    return {**d, "temuan": [x for x in d.get("temuan") or [] if x.get("t") in ada]}
+
+
+_harian_lock = threading.Lock()
+
+
+def daily_builds() -> None:
+    """Pembaruan terjadwal: Seasonality, Pola Broker, Recovery, Harmonic Pattern, Rekomendasi, lalu audit Monitor; masing-masing
+    dicoba ulang tiap 30 menit (maks. 3 jam)."""
+    # Satu rangkaian sekaligus: jadwal 00.01 dan susulan tidak berjalan bersamaan.
+    if not _harian_lock.acquire(blocking=False):
+        print("[harian] rangkaian lain masih berjalan; dilewati", file=sys.stderr)
+        return
+    try:
+        for fn in (season_build, broker_build, recovery_build, harmonik_build, rekomendasi_build, audit_monitor_build):
+            for _ in range(6):
+                try:
+                    fn()
+                    break
+                except Exception as e:
+                    print(f"[{fn.__name__}] gagal: {e}; dicoba lagi 30 menit", file=sys.stderr)
+                    time.sleep(1800)
+    finally:
+        _harian_lock.release()
+
+
+# Susulan data harian: saat token mati, jadwal 00.01 tetap "berhasil" memakai cache basi sehingga tidak dicoba ulang
+# dan harga tertahan sampai jadwal berikutnya. Bila harga di data Recovery tertinggal >= 2 hari bursa dan token
+# berlaku, daily_builds dijalankan sekarang (dicek token_loop tiap 15 menit dan setiap token diganti dari UI).
+SUSULAN_JEDA = 6 * 3600
+_susulan_lock = threading.Lock()
+_susulan_at = 0.0
+
+
+def hari_bursa_mundur(d: date, n: int) -> date:
+    """Tanggal n hari kerja (Senin-Jumat) sebelum d."""
+    while n > 0:
+        d -= timedelta(days=1)
+        if d.weekday() < 5:
+            n -= 1
+    return d
+
+
+def data_tertinggal(now: datetime | None = None) -> bool:
+    """Candle terakhir di data Recovery lebih tua dari 2 hari bursa sebelum hari ini (WIB). Satu hari libur tidak
+    memicu, karena data normal paling lambat tertinggal satu hari bursa."""
+    now = now or datetime.now(timezone.utc)
+    tek = (RC.load(RECOVERY_PATH).get("tek") or {}).values()
+    akhir = max((str(x.get("tanggal") or "") for x in tek), default="")
+    if not akhir:
+        return False
+    return akhir < hari_bursa_mundur((now + timedelta(hours=7)).date(), 2).isoformat()
+
+
+def data_susulan(alasan: str, paksa: bool = False) -> bool:
+    """Bangun ulang data harian di latar bila tertinggal dan token berlaku; paling sering sekali per SUSULAN_JEDA
+    kecuali paksa (token baru dari UI)."""
+    global _susulan_at
+    if not get_token() or token_expired() or not data_tertinggal():
+        return False
+    with _susulan_lock:
+        if not paksa and time.time() - _susulan_at < SUSULAN_JEDA:
+            return False
+        _susulan_at = time.time()
+    print(f"[susulan] data harian tertinggal ({alasan}); membangun ulang sekarang", file=sys.stderr)
+    threading.Thread(target=daily_builds, daemon=True, name="susulan").start()
+    return True
+
+
+def lanjutan_tertunda() -> list:
+    """Langkah akhir daily_builds (Harmonic, Rekomendasi, audit Monitor) yang berkasnya lebih tua dari Recovery lebih
+    dari 1 jam: rangkaian terputus di tengah (mis. server restart karena deploy) setelah Recovery selesai."""
+    try:
+        rec = RECOVERY_PATH.stat().st_mtime
+    except OSError:
+        return []
+    out = []
+    for path, fn in ((HARMONIK_PATH, harmonik_build), (REKO_PATH, rekomendasi_build), (AUDIT_PATH, audit_monitor_build)):
+        try:
+            lama = path.stat().st_mtime < rec - 3600
+        except OSError:
+            lama = True
+        if lama:
+            out.append(fn)
+    return out
+
+
+def data_lanjutan(alasan: str) -> bool:
+    """Jalankan langkah akhir yang tertunda di latar bila token berlaku; berbagi jeda dengan data_susulan."""
+    global _susulan_at
+    if not get_token() or token_expired():
+        return False
+    if _harian_lock.locked():
+        return False                     # rangkaian harian sedang berjalan
+    fns = lanjutan_tertunda()
+    if not fns:
+        return False
+    with _susulan_lock:
+        if time.time() - _susulan_at < SUSULAN_JEDA:
+            return False
+        _susulan_at = time.time()
+    print(f"[susulan] melanjutkan {', '.join(f.__name__ for f in fns)} ({alasan})", file=sys.stderr)
+
+    def jalan():
+        if not _harian_lock.acquire(blocking=False):
+            return
+        try:
+            for fn in fns:
+                try:
+                    fn()
+                except Exception as e:
+                    print(f"[{fn.__name__}] gagal: {e}", file=sys.stderr)
+        finally:
+            _harian_lock.release()
+    threading.Thread(target=jalan, daemon=True, name="susulan").start()
+    return True
+
+
+IHSG_PATH = ROOT / ".ihsg.json"
+
+
+def ihsg_refresh() -> None:
+    """Harga harian IHSG 1 tahun + judul berita pasar terbaru (stream IHSG) untuk kartu kondisi IHSG di Seasonality."""
+    bars = get_ohlc("IHSG", "1y", True)
+    tek = IH.technical(bars)
+    if tek:
+        tek["pola"] = IH.pattern(bars)
+    posts, cursor = [], 0
+    for _ in range(6):
+        j = sb_fetch(f"/stream/v3/symbol/IHSG?category=STREAM_CATEGORY_NEWS&last_stream_id={cursor}&limit=20", True)
+        page = (j.get("data") or {}).get("stream") or []
+        for p in page:
+            isi = re.sub(r"\s+", " ", str(p.get("content_original") or p.get("content") or "")).strip()
+            # "Jakarta, CNBC Indonesia - ..." -> sumber berita dari pembuka paragraf.
+            m = re.match(r"^[A-Z][A-Za-z .]+,\s*([A-Z][\w .]{2,40}?)\s*[-–—]\s*", isi) or re.match(r"^([A-Z][\w]+(?:\.com|\.co\.id|\.id))\s*[-–—]\s*", isi)
+            posts.append({"d": str(p.get("created_at") or "")[:10], "t": str(p.get("created_at") or "")[:16].replace("T", " "),
+                          "title": str(p.get("title") or isi).split(chr(10))[0],
+                          "ringkas": (isi[m.end():] if m else isi)[:900].rstrip(". ") + "…" if isi else "",
+                          "sumber": m.group(1).strip() if m else "", "url": f"https://stockbit.com/post/{p.get('stream_id')}"})
+        if not page:
+            break
+        cursor = page[-1].get("stream_id")
+        time.sleep(0.3)
+    # Media nasional (CNBC, Bloomberg Technoz, IDX Channel, CNN, Kontan, detik, Bisnis, EmitenNews, Katadata, dll.).
+    try:
+        media = BN.collect(days=3, log=lambda s: print(s, file=sys.stderr))
+    except Exception as e:
+        print(f"[ihsg] berita media gagal: {e}", file=sys.stderr)
+        media = []
+    cutoff = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+    berita, seen = [], set()
+    # Judul sama di Stockbit & media: utamakan tautan media aslinya (media diproses lebih dulu).
+    for p in media + posts:
+        k = BN._kunci(p["title"])
+        if p["d"] >= cutoff and k not in seen:
+            seen.add(k)
+            berita.append(p)
+    berita.sort(key=lambda x: x.get("t") or x["d"], reverse=True)
+    data = {"updated": time.strftime("%Y-%m-%d %H:%M"), "tek": tek, "proj": IH.projection_base(bars), "berita": berita[:400],
+            "bars": [{k: b[k] for k in ("d", "o", "h", "l", "c")} for b in bars]}
+    tmp = IHSG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(IHSG_PATH)
+
+
+IHSG_LOCK = threading.Lock()
+IHSG_SEGAR_MIN = 5 * 60  # tombol unduh/perbarui: data dianggap segar bila < 5 menit
+
+
+def ihsg_jam_bursa(now: datetime | None = None) -> bool:
+    """Senin–Jumat 08.45–16.30 WIB."""
+    w = (now or datetime.now(timezone.utc)).astimezone(timezone(timedelta(hours=7)))
+    return w.weekday() < 5 and (8, 45) <= (w.hour, w.minute) <= (16, 30)
+
+
+def ihsg_segarkan(public: bool = False) -> None:
+    """Perbarui .ihsg.json bila lebih tua dari 5 menit; satu proses sekaligus. Pengunjung publik diizinkan
+    memicu pengambilan khusus data IHSG (harga + berita, ±7 panggilan, tetap dibatasi PUBLIC_BUDGET)."""
+    try:
+        if time.time() - IHSG_PATH.stat().st_mtime < IHSG_SEGAR_MIN:
+            return
+    except OSError:
+        pass
+    with IHSG_LOCK:
+        try:
+            if time.time() - IHSG_PATH.stat().st_mtime < IHSG_SEGAR_MIN:
+                return  # sudah diperbarui permintaan lain saat menunggu kunci
+        except OSError:
+            pass
+        old = getattr(_req, "public_fetch", False)
+        _req.public_fetch = old or public
+        try:
+            if get_token():
+                ihsg_refresh()
+        except Exception as e:
+            print(f"[ihsg] segarkan gagal: {e}", file=sys.stderr)
+        finally:
+            _req.public_fetch = old
+
+
+def ihsg_loop() -> None:
+    time.sleep(60)
+    while True:
+        try:
+            if get_token():
+                with IHSG_LOCK:
+                    ihsg_refresh()
+        except Exception as e:
+            print(f"[ihsg] gagal: {e}", file=sys.stderr)
+        # Jam bursa tiap 30 menit agar harga & berita mendekati realtime; di luar jam bursa tiap 2 jam.
+        time.sleep(1800 if ihsg_jam_bursa() else 2 * 3600)
+
+
+# ------------------------------------------------------------------ Live ----
+# Tab Live (Seasonality): harga IHSG intraday (diperbarui tiap menit saat jam bursa oleh live_loop, di luar
+# permintaan pengunjung) + gabungan sinyal Astronacci, Time Series, Seasonality, Pola Broker, Recovery, dan
+# pergerakan hari ini menjadi satu kesimpulan: potensi rebound, potensi turun lagi, lanjut naik, atau netral.
+WIB = timezone(timedelta(hours=7))
+LIVE: dict = {"harga": None, "modul": None, "modulT": 0.0, "harianT": 0.0, "harian": []}
+LIVE_LOCK = threading.Lock()
+LIVE_TF = ("today", "1d")          # timeframe intraday Stockbit yang dicoba berurutan
+LIVE_BOBOT = {"astro": 0.15, "ts": 0.2, "season": 0.2, "broker": 0.15, "recovery": 0.15, "hariini": 0.15, "transaksi": 0.2}
+# Saham kapitalisasi terbesar penggerak IHSG: transaksi broker hari ini dipantau tiap LIVE_TRX_GAP detik.
+LIVE_BESAR = ["BBCA", "BBRI", "BMRI", "BBNI", "TLKM", "ASII", "AMMN", "BREN", "DSSA", "TPIA"]
+LIVE_TRX_GAP = 120
+BULAN_ID = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+
+
+def _idn(v: float, dp: int = 2) -> str:
+    """Angka format Indonesia: 7123.4 -> '7.123,40'."""
+    return f"{v:,.{dp}f}".replace(",", "#").replace(".", ",").replace("#", ".")
+
+
+def _klip(x: float) -> float:
+    return max(-1.0, min(1.0, x))
+
+
+def live_intraday() -> tuple[str | None, list[dict], dict]:
+    """Titik harga sesi terakhir dari grafik intraday Stockbit. Hanya titik bertanggal sama dengan titik terakhir
+    yang dipakai; deret harian (satu titik per hari) ditolak agar tidak dikira intraday."""
+    for tf in LIVE_TF:
+        try:
+            res = sb_fetch(f"/charts/IHSG/daily?timeframe={tf}", True)
+        except Exception as e:
+            print(f"[live] intraday {tf} gagal: {e}", file=sys.stderr)
+            continue
+        d = res.get("data") or {}
+        pts = []
+        for x in d.get("prices") or []:
+            t, v = x.get("formatted_date") or x.get("date"), x.get("value") or x.get("close")
+            try:
+                if t and v:
+                    pts.append({"t": str(t), "v": float(v)})
+            except (TypeError, ValueError):
+                continue
+        if len(pts) < 2:
+            continue
+        hari = pts[-1]["t"][:10]
+        sesi = [p for p in pts if p["t"][:10] == hari]
+        if len(sesi) >= 2:
+            meta = {k: v for k, v in d.items() if isinstance(v, (int, float, str)) and not isinstance(v, bool)}
+            return tf, sesi, meta
+    return None, [], {}
+
+
+def live_harga() -> dict:
+    """Harga terkini IHSG: intraday bila tersedia, cadangan candle harian terbaru (bar hari ini ikut bergerak)."""
+    now = time.time()
+    if now - LIVE["harianT"] > 600 or not LIVE["harian"]:
+        try:
+            LIVE["harian"] = get_ohlc("IHSG", "1y", True)
+            LIVE["harianT"] = now
+        except Exception as e:
+            print(f"[live] harian gagal: {e}", file=sys.stderr)
+    bars = LIVE["harian"] or ihsg_bars()
+    tf, sesi, meta = live_intraday()
+    today = datetime.now(WIB).strftime("%Y-%m-%d")
+    tgl_sesi = sesi[-1]["t"][:10] if sesi and sesi[-1]["t"][:4].isdigit() else today
+    prev = next((float(v) for k, v in meta.items() if re.search(r"prev", k, re.I) and re.match(r"^[\d.]+$", str(v))), None)
+    if prev is None and bars:
+        lalu = [b for b in bars if str(b["d"])[:10] < tgl_sesi]
+        prev = lalu[-1]["c"] if lalu else None
+    if sesi:
+        harga, sumber = sesi[-1]["v"], f"intraday ({tf})"
+    else:
+        harga, sumber = (bars[-1]["c"] if bars else None), "candle harian"
+        tgl_sesi = str(bars[-1]["d"])[:10] if bars else today
+        if bars and len(bars) > 1:
+            prev = bars[-2]["c"]
+    # Harga realtime dari orderbook IHSG: grafik intraday Stockbit bisa tertinggal (mis. saat banyak panggilan lain),
+    # orderbook selalu memuat harga terakhir. Titik menit berjalan ditambahkan/diganti di ujung grafik.
+    if ihsg_jam_bursa():
+        try:
+            ob = _orderbook("IHSG")
+        except Exception as e:
+            ob = None
+            print(f"[live] orderbook IHSG gagal: {e}", file=sys.stderr)
+        if ob and ob["harga"]:
+            harga, prev = ob["harga"], ob.get("prev") or prev
+            if sesi and sesi[-1]["t"][:10] != today:
+                sesi = []
+            menit = datetime.now(WIB).strftime("%Y-%m-%d %H:%M:00")
+            if sesi and sesi[-1]["t"][:16] >= menit[:16]:
+                sesi = sesi[:-1] + [{"t": sesi[-1]["t"], "v": harga}]
+            else:
+                sesi = sesi + [{"t": menit, "v": harga}]
+            tgl_sesi = today
+            sumber = "orderbook realtime" + (f" + grafik intraday ({tf})" if tf else "")
+    if harga is None:
+        return {}
+    vs = [p["v"] for p in sesi] or [harga]
+    return {"harga": harga, "prev": prev, "ubah": round(harga - prev, 2) if prev else None,
+            "ubahPct": round((harga / prev - 1) * 100, 2) if prev else None, "tinggi": max(vs), "rendah": min(vs),
+            "titik": sesi, "tanggal": tgl_sesi, "sumber": sumber, "jamBursa": ihsg_jam_bursa(),
+            "waktu": datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S")}
+
+
+def live_modul() -> list[dict]:
+    """Sinyal per modul (skor -1..1) dari data harian yang sudah dihitung halaman lain."""
+    out, m = [], datetime.now(WIB).month
+    try:
+        a = astro_api()
+        if not a.get("error"):
+            pr, rk = a["proyeksi"], a.get("rekomendasi") or {}
+            out.append({"kunci": "astro", "nama": "Astronacci", "arah": pr["bias"], "skor": {"naik": 0.8, "turun": -0.8}.get(pr["bias"], 0.0),
+                        "teks": f"Bias {pr['bias']} ({pr['ubah']:+.1f}%) menuju {_idn(pr['target'], 0)}" +
+                                (f" sampai {pr['sampai'][8:]}/{pr['sampai'][5:7]}" if pr.get("sampai") else "") + (f"; {rk['tindakan'].lower()}." if rk.get("tindakan") else ".")})
+    except Exception as e:
+        print(f"[live] astro gagal: {e}", file=sys.stderr)
+    try:
+        ts = runtun_api()
+        if not ts.get("error"):
+            p1 = next((x for x in ts["proyeksi"] if x["h"] == 1), None)
+            p5 = next((x for x in ts["proyeksi"] if x["h"] == 5), None)
+            if p5:
+                arah = "naik" if p5["ubah"] > 0.3 else "turun" if p5["ubah"] < -0.3 else "mendatar"
+                out.append({"kunci": "ts", "nama": "Time Series", "arah": arah, "skor": round(_klip(p5["ubah"] / 1.5), 2),
+                            "teks": f"Gabungan model: esok {p1['ubah']:+.2f}%, 1 minggu {p5['ubah']:+.2f}% ke {_idn(p5['sentimen'], 0)}; "
+                                    f"{p5['setuju']}% model memproyeksikan naik."})
+    except Exception as e:
+        print(f"[live] time series gagal: {e}", file=sys.stderr)
+    ih = {}
+    try:
+        ih = ihsg_api(m)
+        if not ih.get("error"):
+            esok = next((h for h in (ih.get("proyeksi") or {}).get("horizon") or [] if h["kunci"] == "esok"), None)
+            mu = ih.get("musiman") or {}
+            pe = esok["prob"] if esok else 50
+            out.append({"kunci": "season", "nama": "Seasonality", "arah": "naik" if pe >= 55 else "turun" if pe <= 45 else "mendatar",
+                        "skor": round(_klip((pe - 50) / 20), 2),
+                        "teks": f"Peluang naik esok {pe}%" + (f"; {BULAN_ID[m - 1]} naik {mu['up']} dari {mu['n']} tahun (median {mu['median']:+.2f}%)" if mu.get("n") else "") + "."})
+    except Exception as e:
+        print(f"[live] seasonality gagal: {e}", file=sys.stderr)
+    fl = (ih or {}).get("flow")
+    if fl:
+        net = fl.get("asing") or 0
+        out.append({"kunci": "broker", "nama": "Pola Broker", "arah": "naik" if net > 0 else "turun" if net < 0 else "mendatar",
+                    "skor": round(_klip(net / 2e12), 2) if net else 0.0,
+                    "teks": f"Asing net {'beli' if net > 0 else 'jual'} Rp{_idn(abs(net) / 1e12, 2)} triliun ({fl.get('bulanNama')}); "
+                            f"domestik net {'beli' if (fl.get('domestik') or 0) > 0 else 'jual'} Rp{_idn(abs(fl.get('domestik') or 0) / 1e12, 2)} triliun."})
+    try:
+        tek = (RC.load(RECOVERY_PATH).get("tek") or {}).values()
+        tek = [x for x in tek if x.get("ema20")]
+        if tek:
+            luas = sum(1 for x in tek if x.get("diAtasEma20")) / len(tek) * 100
+            pulih = sum(1 for x in tek if x["turun"] >= RC.MIN_TURUN and x.get("diAtasEma20") and x.get("higherLow"))
+            dasar = sum(1 for x in tek if RC.dasar(x))
+            out.append({"kunci": "recovery", "nama": "Recovery", "arah": "naik" if luas >= 55 else "turun" if luas <= 45 else "mendatar",
+                        "skor": round(_klip((luas - 50) / 25), 2),
+                        "teks": f"{luas:.0f}% saham di atas EMA20".replace(".", ",") + f"; {pulih} saham turun dalam mulai pulih, {dasar} saham masih di dasar."})
+    except Exception as e:
+        print(f"[live] recovery gagal: {e}", file=sys.stderr)
+    return out
+
+
+def live_hari_ini(h: dict, tek: dict | None) -> dict:
+    """Sinyal pergerakan sesi berjalan: posisi terhadap support/resistance harian dan momentum ±30 titik terakhir."""
+    p, vs = h["harga"], [x["v"] for x in h.get("titik") or []]
+    sup = [x["v"] for x in (tek or {}).get("support") or []]
+    res = [x["v"] for x in (tek or {}).get("resistance") or []]
+    sk, cat = 0.0, []
+    mom = (p / vs[-min(30, len(vs))] - 1) * 100 if len(vs) >= 5 else (h.get("ubahPct") or 0)
+    sk += _klip(mom / 0.6) * 0.5
+    cat.append(f"momentum terakhir {mom:+.2f}%".replace(".", ","))
+    if sup and p < sup[0] * 0.998:
+        sk -= 0.5; cat.append(f"di bawah support {_idn(sup[0], 0)}")
+    elif sup and p <= sup[0] * 1.007 and vs and p > min(vs) * 1.003:
+        sk += 0.5; cat.append(f"memantul dekat support {_idn(sup[0], 0)}")
+    if res and p > res[0] * 1.002:
+        sk += 0.4; cat.append(f"menembus resistance {_idn(res[0], 0)}")
+    elif res and p >= res[0] * 0.995:
+        sk -= 0.2; cat.append(f"mendekati resistance {_idn(res[0], 0)}")
+    sk = _klip(sk)
+    return {"kunci": "hariini", "nama": "Pergerakan hari ini", "arah": "naik" if sk > 0.15 else "turun" if sk < -0.15 else "mendatar",
+            "skor": round(sk, 2), "teks": "; ".join(cat).capitalize() + "."}
+
+
+def _num(v) -> float:
+    try:
+        return abs(float(v or 0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _rupiah(v: float) -> str:
+    """Nilai rupiah ringkas: >= 1 triliun ditulis triliun, selain itu miliar."""
+    v = abs(v)
+    return f"Rp{_idn(v / 1e12, 2)} triliun" if v >= 1e12 else f"Rp{_idn(v / 1e9, 1)} miliar"
+
+
+def _f(v) -> float:
+    """Angka dari teks Stockbit ("6,083,300", "-4.27", "") ke float."""
+    try:
+        return float(str(v).replace(",", "")) if v not in (None, "", "-") else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _orderbook(sym: str) -> dict | None:
+    """Orderbook realtime Stockbit: harga, nilai beli/jual asing hari ini (fbuy/fsell/fnet), dan antrean bid/offer."""
+    d = sb_fetch(f"/company-price-feed/v2/orderbook/companies/{sym}", True).get("data") or {}
+    if not d.get("lastprice"):
+        return None
+    bid = sum(_f(x.get("volume")) for x in d.get("bid") or [])
+    off = sum(_f(x.get("volume")) for x in d.get("offer") or [])
+    return {"s": sym, "harga": _f(d.get("lastprice")), "ubahPct": _f(d.get("percentage_change")),
+            "fbuy": _f(d.get("fbuy")), "fsell": _f(d.get("fsell")), "asing": _f(d.get("fnet")) or _f(d.get("fbuy")) - _f(d.get("fsell")),
+            "bid": bid, "offer": off, "tekanan": round(bid / (bid + off) * 100) if bid + off else None,
+            "porsiAsing": _f(d.get("foreign")) or None, "frekuensi": _f(d.get("frequency")), "prev": _f(d.get("previous")) or None}
+
+
+def live_transaksi() -> dict | None:
+    """Transaksi berjalan di saham penggerak IHSG dari orderbook realtime Stockbit: net asing hari ini, antrean
+    bid vs offer (tekanan beli/jual), dan arah harga. IHSG sendiri dicoba untuk net asing seluruh pasar."""
+    rows = []
+    for sym in LIVE_BESAR:
+        try:
+            ob = _orderbook(sym)
+            if ob:
+                rows.append(ob)
+        except Exception as e:
+            print(f"[live] orderbook {sym} gagal: {e}", file=sys.stderr)
+        time.sleep(0.15)
+    if not rows:
+        return None
+    pasar = None
+    try:
+        ob = _orderbook("IHSG")
+        if ob and (ob["fbuy"] or ob["fsell"]):
+            pasar = {"asing": ob["asing"], "fbuy": ob["fbuy"], "fsell": ob["fsell"]}
+    except Exception:
+        pass
+    total = sum(x["asing"] for x in rows)
+    bid, off = sum(x["bid"] for x in rows), sum(x["offer"] for x in rows)
+    hari = datetime.now(WIB).strftime("%Y-%m-%d")
+    # Riwayat net asing hari ini untuk melihat arah ±15 menit terakhir (asing makin banyak beli atau jual).
+    acuan = pasar["asing"] if pasar else total
+    rw = [x for x in LIVE.get("trxRiwayat") or [] if x[0][:10] == hari]
+    rw.append((datetime.now(WIB).strftime("%Y-%m-%d %H:%M"), acuan))
+    LIVE["trxRiwayat"] = rw[-240:]
+    return {"tanggal": hari, "waktu": datetime.now(WIB).strftime("%H:%M:%S"), "saham": sorted(rows, key=lambda x: -abs(x["asing"])),
+            "asing": total, "pasar": pasar, "asingBeli": sum(1 for x in rows if x["asing"] > 0), "asingJual": sum(1 for x in rows if x["asing"] < 0),
+            "naik": sum(1 for x in rows if x["ubahPct"] > 0), "turun": sum(1 for x in rows if x["ubahPct"] < 0),
+            "tekanan": round(bid / (bid + off) * 100) if bid + off else None, "n": len(rows)}
+
+
+def arah_asing(net: float, tren: float) -> str:
+    """Perubahan net asing dalam kalimat: beli/jual asing bertambah atau mulai berkurang."""
+    if tren > 0:
+        return "beli asing bertambah" if net >= 0 else "jual asing mulai berkurang"
+    return "jual asing bertambah" if net < 0 else "beli asing mulai berkurang"
+
+
+def live_trx_modul(tx: dict | None) -> dict | None:
+    """Sinyal transaksi: net asing (45%), arah harga saham penggerak (25%), tekanan antrean bid vs offer (15%),
+    dan perubahan net asing ±15 menit terakhir (15%)."""
+    if not tx:
+        return None
+    net = tx["pasar"]["asing"] if tx.get("pasar") else tx["asing"]
+    rw = LIVE.get("trxRiwayat") or []
+    batas = (datetime.now(WIB) - timedelta(minutes=15)).strftime("%Y-%m-%d %H:%M")
+    lalu = next((v for t, v in reversed(rw) if t <= batas), None)
+    tren = None if lalu is None else net - lalu
+    sk = 0.45 * _klip(net / 500e9) + 0.25 * (tx["naik"] - tx["turun"]) / max(1, tx["n"])
+    if tx.get("tekanan") is not None:
+        sk += 0.15 * _klip((tx["tekanan"] - 50) / 20)
+    if tren is not None:
+        sk += 0.15 * _klip(tren / 100e9)
+    sk = _klip(sk)
+    m = _rupiah
+    teks = (f"{'Seluruh pasar' if tx.get('pasar') else str(tx['n']) + ' saham penggerak IHSG'}: asing net {'beli' if net >= 0 else 'jual'} {m(net)}; "
+            f"saham penggerak {tx['naik']} naik, {tx['turun']} turun")
+    if tx.get("tekanan") is not None:
+        teks += f"; antrean beli {tx['tekanan']}% vs jual {100 - tx['tekanan']}%"
+    if tren is not None and abs(tren) >= 5e9:
+        teks += f"; 15 menit terakhir {arah_asing(net, tren)} ({m(tren)})"
+    return {"kunci": "transaksi", "nama": "Transaksi hari ini", "arah": "naik" if sk > 0.15 else "turun" if sk < -0.15 else "mendatar",
+            "skor": round(sk, 2), "teks": teks + ".", "tren": tren, "net": net}
+
+
+def live_refresh() -> None:
+    h = live_harga()
+    if h:
+        LIVE["harga"] = h
+    if time.time() - LIVE["modulT"] > 300 or LIVE["modul"] is None:
+        LIVE["modul"] = live_modul()
+        LIVE["modulT"] = time.time()
+    # Transaksi broker hari ini: hanya saat jam bursa (atau sekali bila belum ada), tiap LIVE_TRX_GAP detik.
+    if (ihsg_jam_bursa() or not LIVE.get("trx")) and time.time() - LIVE.get("trxT", 0) > LIVE_TRX_GAP:
+        LIVE["trxT"] = time.time()
+        tx = live_transaksi()
+        if tx:
+            LIVE["trx"] = tx
+
+
+def live_loop() -> None:
+    time.sleep(30)
+    while True:
+        try:
+            if get_token():
+                with LIVE_LOCK:
+                    live_refresh()
+        except Exception as e:
+            print(f"[live] gagal: {e}", file=sys.stderr)
+        # Jam bursa tiap 20 detik (mendekati realtime); di luar jam bursa tiap 30 menit (harga penutupan sudah final).
+        time.sleep(20 if ihsg_jam_bursa() else 1800)
+
+
+def live_tertahan(jam_bursa: bool) -> dict | None:
+    """Peringatan bila data Live tidak lagi diperbarui: token Stockbit kedaluwarsa/ditolak, atau saat jam bursa panggilan
+    terakhir gagal / sukses terakhir > 3 menit lalu. None = data berjalan normal."""
+    now = time.time()
+    exp = token_exp()
+    sejak = datetime.fromtimestamp(SB_LIVE["ok"], WIB).strftime("%H.%M") if SB_LIVE["ok"] else None
+    if exp and exp < now:
+        return {"alasan": "token Stockbit kedaluwarsa", "sejak": sejak,
+                "teks": "Data Live tertahan: token Stockbit kedaluwarsa. Angka di bawah adalah data terakhir yang berhasil diambil."}
+    if not jam_bursa:
+        return None
+    gagal_baru = SB_LIVE["gagal"] > SB_LIVE["ok"] and now - SB_LIVE["gagal"] < 300
+    basi = SB_LIVE["ok"] and now - SB_LIVE["ok"] > 180
+    if gagal_baru or basi:
+        alasan = "token Stockbit ditolak" if "401" in SB_LIVE["pesan"] else "Stockbit tidak merespons"
+        return {"alasan": alasan, "sejak": sejak,
+                "teks": f"Data Live tertahan{' sejak pukul ' + sejak if sejak else ''}: {alasan}. Angka di bawah belum tentu terbaru."}
+    return None
+
+
+def live_api() -> dict:
+    h = LIVE.get("harga")
+    if not h:
+        return {"error": "Data Live IHSG sedang disiapkan (diperbarui tiap menit saat jam bursa). Coba lagi sebentar lagi."}
+    tertahan = live_tertahan(bool(h.get("jamBursa")))
+    tek = IH_load().get("tek")
+    trx = LIVE.get("trx")
+    tm = live_trx_modul(trx)
+    modul = list(LIVE.get("modul") or []) + [live_hari_ini(h, tek)] + ([tm] if tm else [])
+    w = sum(LIVE_BOBOT.get(x["kunci"], 0.1) for x in modul) or 1
+    skor = round(sum(x["skor"] * LIVE_BOBOT.get(x["kunci"], 0.1) for x in modul) / w * 100)
+    for x in modul:
+        x["bobot"] = round(LIVE_BOBOT.get(x["kunci"], 0.1) / w * 100)
+        x["teks"] = re.sub(r"(\d)\.(\d+%)", r"\1,\2", x["teks"])  # desimal persen gaya Indonesia (+1,1%)
+    ch = h.get("ubahPct") or 0
+    kondisi = "naik" if ch > 0.15 else "turun" if ch < -0.15 else "datar"
+    if kondisi == "turun":
+        label = "Potensi rebound" if skor >= 15 else "Potensi turun lagi" if skor <= -15 else "Turun, belum ada arah"
+    elif kondisi == "naik":
+        label = "Potensi lanjut naik" if skor >= 15 else "Rawan berbalik turun" if skor <= -15 else "Naik, belum ada arah"
+    else:
+        label = "Cenderung naik" if skor >= 15 else "Cenderung turun" if skor <= -15 else "Netral, menunggu arah"
+    nada = "good" if skor >= 15 else "bad" if skor <= -15 else "warn"
+    sup = [x["v"] for x in (tek or {}).get("support") or []]
+    res = [x["v"] for x in (tek or {}).get("resistance") or []]
+    # Narasi suara: hanya kondisi IHSG saat ini (tanpa menyebut nama analisa) agar bisa dibacakan tiap menit.
+    vs = [x["v"] for x in h.get("titik") or []]
+    jam_t = (re.search(r"(\d{1,2}):(\d{2})", (h.get("titik") or [{}])[-1].get("t", "")) if h.get("titik") else None)
+    pukul = f"pukul {jam_t.group(1)}.{jam_t.group(2)}" if jam_t and h.get("jamBursa") else ("saat ini" if h.get("jamBursa") else "pada penutupan terakhir")
+    gerak = (f"{'naik' if ch > 0 else 'turun'} {_idn(abs(ch))} persen" if abs(ch) >= 0.01 else "tidak berubah") + " dari penutupan kemarin"
+    narasi = [f"IHSG {pukul} di {_idn(h['harga'], 0)}, {gerak}."]
+    if tertahan:
+        narasi.insert(0, f"Perhatian, data Live tertahan{' sejak pukul ' + tertahan['sejak'] if tertahan['sejak'] else ''}.")
+    if h.get("jamBursa") and len(vs) >= 6:
+        m5 = (vs[-1] / vs[-6] - 1) * 100
+        narasi.append("Beberapa menit terakhir " + ("sedang menguat." if m5 > 0.05 else "sedang melemah." if m5 < -0.05 else "bergerak datar."))
+    # Arah transaksi real time (net asing, antrean bid/offer, arah saham penggerak): cukup potensi naik/turun.
+    arah_trx = None
+    if tm:
+        arah_trx = {"label": "Potensi naik" if tm["skor"] > 0.15 else "Potensi turun" if tm["skor"] < -0.15 else "Belum ada arah",
+                    "nada": "good" if tm["skor"] > 0.15 else "bad" if tm["skor"] < -0.15 else "warn", "waktu": trx.get("waktu")}
+        narasi.append(f"Arah transaksi real time: {arah_trx['label'].lower()}.")
+    narasi.append(f"Kondisi saat ini: {label.lower()}.")
+    if label == "Potensi rebound" and sup:
+        narasi.append(f"Perhatikan pantulan di {_idn(sup[0], 0)}" + (f", target terdekat {_idn(res[0], 0)}." if res else "."))
+    elif label in ("Potensi turun lagi", "Rawan berbalik turun") and sup:
+        narasi.append(f"Waspadai turun ke {_idn(sup[0], 0)}" + (f", lalu {_idn(sup[1], 0)}." if len(sup) > 1 else "."))
+    elif label == "Potensi lanjut naik" and res:
+        narasi.append(f"Ruang naik menuju {_idn(res[0], 0)}.")
+    return {**h, "skor": skor, "label": label, "nada": nada, "kondisi": kondisi, "modul": modul, "transaksi": trx, "arahTransaksi": arah_trx, 
+            "support": sup, "resistance": res, "narasi": narasi, "tertahan": tertahan,
+            "catatan": "Skor gabungan -100 sampai +100 dari bobot tiap modul. Analisa otomatis berbasis data historis dan harga berjalan, bukan rekomendasi beli/jual."}
+
+
+def ihsg_api(month: int) -> dict:
+    d = IH_load()
+    if not d.get("tek"):
+        return {"error": "Data kondisi IHSG sedang disiapkan. Coba lagi beberapa menit lagi."}
+    tek = d["tek"]
+    series = (season_data().get("index") or {}).get("IHSG") or {}
+    base = SZ.month_stats(series, month, 10, datetime.now().date()) if series else None
+    state = "atas" if tek["harga"] > tek["ema200"] else "bawah"
+    cond = IH.conditional(series, month, state) if series else {"kondisi": state, "n": 0, "prob": None, "tahun": []}
+    sent = IH.sentiment(d.get("berita") or [])
+    ber = IH.verdict(base, cond, sent)
+    flow = BP.market_flow(broker_data()) if broker_data() else None
+    BL = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    riset = IH.narrative(tek, tek.get("pola") or {}, flow, ber, BL[month - 1])
+    proyeksi = IH.projection(d.get("proj"), tek, sent, flow, ber)
+    return {"updated": d.get("updated"), "bulan": month, "tek": tek, "sentimen": sent, "kondisi": cond,
+            "musiman": base and {k: base[k] for k in ("n", "up", "prob", "median")}, "berulang": ber, "flow": flow, "riset": riset,
+            "proyeksi": proyeksi, "berita": (d.get("berita") or [])[:40],
+            "sumberBerita": sorted({p.get("sumber") or "Stockbit" for p in d.get("berita") or []})}
+
+
+_ts_memo: dict = {}
+
+
+def ihsg_bars() -> list[dict]:
+    """Candle harian IHSG 1 tahun dari .ihsg.json (diperbarui ihsg_loop); bila belum ada, ambil langsung."""
+    b = IH_load().get("bars")
+    return b if b else get_ohlc("IHSG", "1y")
+
+
+def runtun_api() -> dict:
+    """Time Series: model runtun waktu klasik + faktor sentimen. Dihitung ulang hanya bila data IHSG berubah."""
+    d = IH_load()
+    key = ("ts", d.get("updated"), datetime.now().strftime("%Y-%m-%d"))
+    if _ts_memo.get("ts", (None,))[0] == key:
+        return _ts_memo["ts"][1]
+    bars = ihsg_bars()
+    month = datetime.now().month
+    series = (season_data().get("index") or {}).get("IHSG") or {}
+    ms = SZ.month_stats(series, month, 10, datetime.now().date()) if series else None
+    base = TS.build(bars, (ms or {}).get("median") or 0.0)
+    if not base:
+        return {"error": "Data harga IHSG belum cukup untuk model runtun waktu. Coba lagi beberapa menit lagi."}
+    sent = IH.sentiment(d.get("berita") or [])
+    flow = BP.market_flow(broker_data()) if broker_data() else None
+    out = {"updated": d.get("updated"), **base, **TS.combine(base, sent, flow),
+           "sentimen": {k: sent.get(k) for k in ("skor", "arah", "nPos", "nNeg")}}
+    _ts_memo["ts"] = (key, out)
+    return out
+
+
+# ------------------------------------------------- riwayat ramalan vs kenyataan ----
+RAMALAN_PATH = ROOT / ".ramalan-log.json"
+RAMALAN_H = (1, 5, 21)      # horizon Time Series (hari bursa): esok, 1 minggu, 1 bulan
+
+
+def ramalan_load() -> dict:
+    try:
+        return json.loads(RAMALAN_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def ramalan_catat() -> bool:
+    """Catat ramalan Time Series & Astronacci untuk tanggal bursa terakhir (satu entri per tanggal, ditimpa yang terbaru
+    sehingga yang tersimpan adalah ramalan setelah bursa tutup). True bila ada yang dicatat."""
+    ts, ast = runtun_api(), astro_api()
+    if ts.get("error") or not ts.get("riwayat"):
+        return False
+    tgl = ts["riwayat"][-1]["d"]
+    log = ramalan_load()
+    e = {"tanggal": tgl, "harga": ts.get("harga"),
+         "ts": {str(p["h"]): p.get("sentimen") for p in ts.get("proyeksi") or [] if p.get("h") in RAMALAN_H}}
+    pr = (ast or {}).get("proyeksi") or {}
+    if pr.get("bias"):
+        e["astro"] = {"bias": pr["bias"], "target": pr.get("target"), "sampai": pr.get("sampai"),
+                      "tindakan": ((ast.get("rekomendasi") or {}).get("tindakan"))}
+    log[tgl] = e
+    keep = sorted(log)[-250:]
+    tmp = RAMALAN_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({d: log[d] for d in keep}, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(RAMALAN_PATH)
+    return True
+
+
+def ramalan_loop() -> None:
+    """Catat ramalan tiap 30 menit (cukup murah: hasil runtun/astro di-memo per versi data IHSG)."""
+    time.sleep(300)
+    while True:
+        try:
+            ramalan_catat()
+        except Exception as e:
+            print(f"[ramalan] gagal: {e}", file=sys.stderr)
+        time.sleep(1800)
+
+
+def ramalan_api(log: dict | None = None, bars: list[dict] | None = None) -> dict:
+    """Ramalan yang sudah jatuh tempo dibandingkan dengan penutupan IHSG sebenarnya: selisih (%) dan ketepatan arah.
+    Time Series per horizon 1/5/21 hari bursa; Astronacci = arah bias vs perubahan 21 hari bursa."""
+    log = ramalan_load() if log is None else log
+    bars = ihsg_bars() if bars is None else bars
+    idx = {str(b["d"])[:10]: i for i, b in enumerate(bars)}
+    rows_ts, rows_as = [], []
+    for tgl in sorted(log, reverse=True):
+        e = log[tgl]
+        i, p0 = idx.get(tgl), e.get("harga")
+        if i is None or not p0:
+            continue
+        for h in RAMALAN_H:
+            ram = (e.get("ts") or {}).get(str(h))
+            if ram is None:
+                continue
+            akt = bars[i + h]["c"] if i + h < len(bars) else None
+            rows_ts.append({"tanggal": tgl, "h": h, "harga": p0, "ramalan": ram, "aktual": akt,
+                            "tglAktual": str(bars[i + h]["d"])[:10] if akt else None,
+                            "selisih": round((ram / akt - 1) * 100, 2) if akt else None,
+                            "arahTepat": ((ram - p0) * (akt - p0) > 0) if akt and ram != p0 and akt != p0 else None})
+        a = e.get("astro")
+        if a:
+            akt = bars[i + 21]["c"] if i + 21 < len(bars) else None
+            rows_as.append({"tanggal": tgl, "harga": p0, "bias": a["bias"], "target": a.get("target"), "tindakan": a.get("tindakan"),
+                            "aktual": akt, "ubah": round((akt / p0 - 1) * 100, 2) if akt else None,
+                            "arahTepat": ((akt > p0) == (a["bias"] == "naik")) if akt and akt != p0 and a["bias"] in ("naik", "turun") else None})
+
+    def ringkas(rows):
+        ok = [r for r in rows if r["arahTepat"] is not None]
+        sel = [abs(r["selisih"]) for r in rows if r.get("selisih") is not None]
+        return {"n": len(ok), "arahTepat": round(sum(1 for r in ok if r["arahTepat"]) / len(ok) * 100) if ok else None,
+                "galat": round(sum(sel) / len(sel), 2) if sel else None}
+    return {"mulai": min(log) if log else None, "tercatat": len(log),
+            "ts": {"baris": rows_ts[:90], "ringkas": {str(h): ringkas([r for r in rows_ts if r["h"] == h]) for h in RAMALAN_H}},
+            "astro": {"baris": rows_as[:40], "ringkas": ringkas(rows_as)}}
+
+
+# ------------------------------------------------ Seasonality: terbukti bulan lalu ----
+def season_bukti(month: int | None = None, data: dict | None = None, today=None) -> dict:
+    """Uji pola Seasonality bulan lalu tanpa melihat hasilnya: peluang naik dihitung dari 10 tahun SEBELUM tahun berjalan,
+    lalu dibandingkan dengan return bulan itu tahun ini (data Seasonality per tahun/bulan)."""
+    data = season_data() if data is None else data
+    today = today or datetime.now(WIB).date()
+    if month is None:
+        month = 12 if today.month == 1 else today.month - 1
+    th = today.year if month < today.month else today.year - 1
+    sebelum = date(th - 1, 12, 31)
+    stock = data.get("stock") or {}
+    rows = []
+    for t, rec in stock.items():
+        s = rec.get("s") or {}
+        akt = (s.get(str(th)) or {}).get(str(month))
+        if akt is None:
+            continue
+        st = SZ.month_stats({y: v for y, v in s.items() if int(y) < th}, month, 9, sebelum)
+        if not st or st["n"] < 6:
+            continue
+        rows.append({"t": t, "nama": rec.get("name") or "", "prob": st["prob"], "n": st["n"], "up": st["up"], "median": st["median"],
+                     "wl": st["wl"], "aktual": round(akt, 2), "terbukti": akt > 0})
+    pilihan = sorted((r for r in rows if r["prob"] >= 70), key=lambda r: (-r["wl"], -r["median"]))[:25]
+    semua_naik = round(sum(1 for r in rows if r["aktual"] > 0) / len(rows) * 100) if rows else None
+    kuat = [r for r in rows if r["prob"] >= 70]
+    ih = (data.get("index") or {}).get("IHSG") or {}
+    ih_akt = (ih.get(str(th)) or {}).get(str(month))
+    ih_st = SZ.month_stats({y: v for y, v in ih.items() if int(y) < th}, month, 9, sebelum) if ih else None
+    return {"bulan": month, "tahun": th, "pilihan": pilihan,
+            "ringkas": {"pilihanNaik": sum(1 for r in pilihan if r["terbukti"]), "pilihanN": len(pilihan),
+                        "pilihanMedian": SZ.statistics.median([r["aktual"] for r in pilihan]) if pilihan else None,
+                        "polaKuatNaik": round(sum(1 for r in kuat if r["terbukti"]) / len(kuat) * 100) if kuat else None, "polaKuatN": len(kuat),
+                        "semuaNaik": semua_naik, "semuaN": len(rows)},
+            "ihsg": {"prob": (ih_st or {}).get("prob"), "median": (ih_st or {}).get("median"), "aktual": ih_akt,
+                     "terbukti": (ih_akt > 0) == ((ih_st or {}).get("prob", 50) >= 50) if ih_akt is not None and ih_st else None}}
+
+
+def astro_api() -> dict:
+    """Astronacci: fase bulan + Fibonacci harga & waktu IHSG."""
+    d = IH_load()
+    key = ("as", d.get("updated"), datetime.now().strftime("%Y-%m-%d"))
+    if _ts_memo.get("as", (None,))[0] == key:
+        return _ts_memo["as"][1]
+    out = AS.build(ihsg_bars())
+    if not out:
+        return {"error": "Data harga IHSG belum cukup untuk perhitungan Astronacci. Coba lagi beberapa menit lagi."}
+    out["updated"] = d.get("updated")
+    try:
+        ts = runtun_api()
+    except Exception as e:
+        print(f"[astro] time series gagal: {e}", file=sys.stderr)
+        ts = None
+    out["rekomendasi"] = AS.rekomendasi(out, ts if ts and not ts.get("error") else None, IH.sentiment(d.get("berita") or []))
+    _ts_memo["as"] = (key, out)
+    return out
+
+
+def IH_load() -> dict:
+    try:
+        return json.loads(IHSG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def season_loop() -> None:
+    time.sleep(120)  # beri waktu loop kandidat/tsa mengisi universe lebih dulu
+    # Recovery versi lama (tanpa kinerja per periode): bangun ulang sekali agar kategori Dasar/Tercepat langsung terisi.
+    try:
+        rd0 = RC.load(RECOVERY_PATH)
+        if rd0.get("tek") and not any("ret" in x for x in list(rd0["tek"].values())[:5]) and get_token():
+            recovery_build()
+    except Exception as e:
+        print(f"[recovery] bangun ulang skema gagal: {e}", file=sys.stderr)
+    # Belum ada data sama sekali: bangun sekarang agar halaman tidak kosong, lalu ikuti jadwal.
+    for path, fn in ((SEASON_PATH, season_build), (BROKER_PATH, broker_build), (RECOVERY_PATH, recovery_build),
+                     (HARMONIK_PATH, harmonik_build)):
+        while not path.exists():
+            try:
+                if get_token():
+                    fn()
+                    break
+            except Exception as e:
+                print(f"[{fn.__name__}] gagal: {e}; dicoba lagi 30 menit", file=sys.stderr)
+            time.sleep(1800)
+    # Aturan pemindai Harmonic berubah (deploy baru): pindai ulang sekarang agar tab Screening memakai aturan terbaru.
+    if get_token() and harmonik_usang():
+        print("[harmonik] aturan pemindai berubah; memindai ulang sekarang", file=sys.stderr)
+        try:
+            harmonik_build()
+        except Exception as e:
+            print(f"[harmonik] pindai ulang gagal: {e}", file=sys.stderr)
+    # Audit Monitor belum pernah dibuat (deploy pertama fitur ini): buat sekarang.
+    if get_token() and not AUDIT_PATH.exists():
+        try:
+            audit_monitor_build()
+        except Exception as e:
+            print(f"[audit-monitor] gagal: {e}", file=sys.stderr)
+    # Jadwal 00.01 terlewat (server mati/restart melewati jam itu): kejar sekali sekarang.
+    if get_token() and any(jadwal_terlewat(p, datetime.now(timezone.utc)) for p in (SEASON_PATH, BROKER_PATH)):
+        print("[seasonality] jadwal harian terlewat; memperbarui sekarang", file=sys.stderr)
+        try:
+            daily_builds()
+        except Exception as e:
+            print(f"[seasonality] pembaruan susulan gagal: {e}", file=sys.stderr)
+    while True:
+        nxt = season_next_run(datetime.now(timezone.utc))
+        time.sleep(max(1.0, (nxt - datetime.now(timezone.utc)).total_seconds()))
+        daily_builds()
+
+
+def season_api(month: int, years: int) -> dict:
+    data = season_data()
+    if not data:
+        return {"error": "Data seasonality sedang disiapkan (pembaruan otomatis Senin-Sabtu pukul 00.01 WIB). Coba lagi beberapa menit lagi."}
+    kd = {k["ticker"] for k in (_kd_memo[1].get("items", []) if _kd_memo else [])}
+    return SZ.analyze(data, month, years, tsa_load("signals"), {i["ticker"] for i in items_all()}, kd)
+
+
+def pov_loop() -> None:
+    """Hitung POV di latar belakang (setelah start, lalu tiap 6 jam) supaya halaman publik tidak menunggu.
+    Bila gagal (mis. token kedaluwarsa), dicoba lagi tiap 30 menit sehingga pulih sendiri setelah token diganti."""
+    time.sleep(90)
+    while True:
+        ok = False
+        if get_token():
+            try:
+                ok = bool(get_pov(fresh=True).get("users")) and _pov_memo and _pov_memo[0] > 0
+            except Exception as e:
+                print(f"[pov] gagal: {e}", file=sys.stderr)
+        time.sleep(6 * 3600 + 120 if ok else 1800)
 
 
 def _kandidat(cfg: dict, fresh: bool = False) -> dict:
@@ -1392,15 +6448,41 @@ def _kandidat(cfg: dict, fresh: bool = False) -> dict:
         except Exception as e:
             errors.append({"source": "Berita", "error": str(e)})
 
+    # 3b) Keterbukaan seluruh BEI (StockbitReports): pengambilalihan, rights issue, perubahan usaha.
+    try:
+        for r in market_reports(fresh=fresh):
+            for sid in kandidat_sigs(r["title"]):
+                if sid in ("akuisisi", "rights", "kbli"):
+                    add(r["ticker"], sid, r["date"], r["title"], r["url"])
+    except Exception as e:
+        errors.append({"source": "Keterbukaan BEI", "error": str(e)})
+
+    # 3c) Berita StockbitNews seluruh BEI: rencana pengambilalihan sering diberitakan sebelum KSEI mencatatnya
+    # (mis. DGIK 4 Nov 2026: "Tokyu Construction Siap Caplok 25 Persen Saham Nusa Konstruksi").
+    try:
+        for r in market_reports(days=14, pages=15, fresh=fresh, akun="StockbitNews"):
+            for sid in kandidat_sigs(r["title"]):
+                if sid in ("akuisisi", "rights", "kbli"):
+                    add(r["ticker"], sid, r["date"], r["title"], r["url"])
+    except Exception as e:
+        errors.append({"source": "Berita StockbitNews", "error": str(e)})
+
     # 4) Periksa keterbukaan informasi tiap calon; data harga dari halaman Stockbit.
     out = []
-    for t in sorted(found, key=lambda x: -len(found[x]["signals"]))[:KANDIDAT_MAX]:
+    # Sinyal pengendalian (termasuk sinyal dini kreditur) diperiksa lebih dulu agar tidak terpotong KANDIDAT_MAX.
+    for t in sorted(found, key=lambda x: (-("akuisisi" in found[x]["signals"]), -len(found[x]["signals"])))[:KANDIDAT_MAX]:
         k = found[t]
         try:
             if cfg.get("reports"):
                 for r in get_reports(cfg["reports"], t, fresh, max_pages=1):
                     for sid in kandidat_sigs(r["title"]):
                         add(t, sid, r["date"], r["title"], r["url"])
+            # Feed pasar KSEI bisa tertinggal: periksa langsung pemegang baru >= 20% di emiten ini.
+            if "akuisisi" in k["signals"]:
+                nc = new_controller(t, fresh=fresh)
+                if nc:
+                    add(t, "akuisisi", nc["date"], nc["text"], "https://stockbit.com/symbol/" + t)
+                    k["pengendaliBaru"] = nc
             co = page_props(t, fresh).get("company") or {}
             k["name"] = co.get("name") or ""
             k["price"] = float(co["lastprice"]) if co.get("lastprice") not in (None, "") else None
@@ -1420,6 +6502,253 @@ def _kandidat(cfg: dict, fresh: bool = False) -> dict:
     return {"asOf": datetime.now().isoformat(timespec="seconds"), "items": out, "errors": errors}
 
 # ---------------------------------------------------------------- server ----
+
+
+# ---------------------------------------------------------------- sinkron ----
+# Sinkron dua arah dengan server lain (mis. jni-server <-> laptop) lewat Tailscale, tiap SINKRON_GAP detik, aktif bila
+# website/.sinkron-peer berisi URL peer (http://100.x.y.z:8765) dan website/.sinkron-kunci berisi kunci bersama yang
+# sama di kedua mesin. Cukup satu sisi yang punya .sinkron-peer (sisi itu menarik dan mengirim); sisi lain hanya perlu
+# kunci dan harus bisa dijangkau (server dijalankan dengan --lan). Aturan gabung ada di sinkron.py.
+SINKRON_PEER_PATH = ROOT / ".sinkron-peer"
+SINKRON_KUNCI_PATH = ROOT / ".sinkron-kunci"
+SINKRON_GAP = 10 * 60
+SINKRON_MAKS_BODY = 64_000_000
+SINKRON_STATE = {"peer": None, "at": None, "ok": None, "ditarik": 0, "dikirim": 0, "data": 0, "token": "", "galat": ""}
+_sinkron_lock = threading.Lock()
+
+
+def sinkron_kunci() -> str | None:
+    k = read_token(SINKRON_KUNCI_PATH)
+    return k if k and len(k) >= 16 else None
+
+
+def sinkron_peer() -> str | None:
+    p = read_token(SINKRON_PEER_PATH)
+    return p.rstrip("/") if p and re.match(r"^https?://[\w.\-\[\]:]+/?$", p) else None
+
+
+def _exp_token(t: str | None) -> int:
+    try:
+        bagian = (t or "").split(".")[1]
+        return int(json.loads(base64.urlsafe_b64decode(bagian + "=" * (-len(bagian) % 4))).get("exp") or 0)
+    except (IndexError, ValueError, TypeError):
+        return 0
+
+
+def sinkron_ekspor() -> dict:
+    """Data tim untuk peer: item (dengan updated_at), jejak suntingan, posisi diagram, kandidat tersembunyi, berita,
+    dan snapshot harian 60 hari terakhir."""
+    batas = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    return {
+        "items": [{"ticker": t, "data": json.loads(d), "updated_at": at} for t, d, at in data_rows("SELECT ticker, data, updated_at FROM items")],
+        "jejak": [{"tabel": a, "kunci": b, "at": c, "hapus": h} for a, b, c, h in data_rows("SELECT tabel, kunci, at, hapus FROM jejak")],
+        "layout": {t: json.loads(d) for t, d in data_rows("SELECT ticker, data FROM layout")},
+        "hidden": {t: at for t, at in data_rows("SELECT ticker, hidden_at FROM kandidat_hidden")},
+        "updates": updates_all(),
+        "snapshots": [{"day": a, "ticker": b, "taken_at": c, "data": d}
+                      for a, b, c, d in data_rows("SELECT day, ticker, taken_at, data FROM snapshots WHERE day>=?", (batas,))],
+    }
+
+
+def sinkron_terapkan(ops: list[tuple]) -> int:
+    n = 0
+    for op in ops:
+        k = op[0]
+        if k in ("item", "item_hapus", "layout", "layout_hapus", "hidden", "hidden_hapus") and not TICKER_RE.match(str(op[1])):
+            continue
+        if k == "item" and valid_item(op[2]) and op[2]["ticker"] == op[1]:
+            data_exec("INSERT OR REPLACE INTO items VALUES(?,?,?)", [(op[1], json.dumps(op[2], ensure_ascii=False), int(op[3] or time.time()))])
+        elif k == "item_hapus":
+            data_exec("DELETE FROM items WHERE ticker=?", [(op[1],)])
+        elif k == "layout" and isinstance(op[2], dict):
+            data_exec("INSERT OR REPLACE INTO layout VALUES(?,?)", [(op[1], json.dumps(op[2], ensure_ascii=False))])
+        elif k == "layout_hapus":
+            data_exec("DELETE FROM layout WHERE ticker=?", [(op[1],)])
+        elif k == "hidden":
+            data_exec("INSERT OR REPLACE INTO kandidat_hidden VALUES(?,?)", [(op[1], int(op[2] or time.time()))])
+        elif k == "hidden_hapus":
+            data_exec("DELETE FROM kandidat_hidden WHERE ticker=?", [(op[1],)])
+        elif k == "jejak" and op[1] in SK.TABEL_JEJAK:
+            data_exec("INSERT OR REPLACE INTO jejak VALUES(?,?,?,?)", [(op[1], str(op[2]), int(op[3]), int(op[4]))])
+        elif k == "update" and valid_update(op[1]):
+            updates_put([op[1]])
+        elif k == "snapshot" and TICKER_RE.match(str(op[1].get("ticker"))):
+            data_exec("INSERT OR IGNORE INTO snapshots VALUES(?,?,?,?)",
+                      [(str(op[1]["day"]), op[1]["ticker"], int(op[1].get("taken_at") or 0), str(op[1].get("data") or "{}"))])
+        else:
+            continue
+        n += 1
+    return n
+
+
+def _sinkron_segarkan(rels: list[str]) -> None:
+    """Memo yang tidak memeriksa waktu ubah berkas dikosongkan setelah menerima berkas baru."""
+    global _pd_indeks, _pov_memo
+    if any(r.startswith(".pov-dalam/") for r in rels):
+        with _pd_idx_lock:
+            _pd_indeks = None
+    if ".pov.json" in rels:
+        _pov_memo = None
+
+
+def token_tulis(tok: str) -> None:
+    """Tulis token Stockbit; bila .stockbit-token berupa symlink (jni-server), yang ditulis berkas tujuannya."""
+    target = TOKEN_PATH.resolve() if TOKEN_PATH.is_symlink() else TOKEN_PATH
+    SK.tulis_atomik(target, (tok.strip() + "\n").encode())
+
+
+def sinkron_get(path: str, rel: str) -> dict:
+    if path == "api/sinkron/manifest":
+        return {"versi": 1, "berkas": SK.manifest(ROOT), "tokenExp": _exp_token(read_token(TOKEN_PATH))}
+    if path == "api/sinkron/berkas" and SK.berkas_sah(rel) and (ROOT / rel).is_file():
+        f = ROOT / rel
+        return {"p": rel, "mtime": int(f.stat().st_mtime), "b64": base64.b64encode(f.read_bytes()).decode()}
+    if path == "api/sinkron/data":
+        return sinkron_ekspor()
+    if path == "api/sinkron/token":
+        t = read_token(TOKEN_PATH)
+        return {"token": t, "exp": _exp_token(t)}
+    return {"error": "Tidak ditemukan."}
+
+
+def sinkron_post(path: str, body) -> dict:
+    if not isinstance(body, dict):
+        raise ValueError("Body sinkron tidak valid.")
+    if path == "api/sinkron/berkas":
+        rel, mtime = body.get("p"), int(body.get("mtime") or 0)
+        if not SK.berkas_sah(rel) or not mtime:
+            raise ValueError("Berkas sinkron tidak diizinkan.")
+        f = ROOT / rel
+        if f.is_file() and int(f.stat().st_mtime) + SK.TOLERANSI >= mtime:
+            return {"ok": True, "dilewati": True}
+        SK.tulis_atomik(f, base64.b64decode(body.get("b64") or ""), mtime)
+        _sinkron_segarkan([rel])
+        return {"ok": True}
+    if path == "api/sinkron/data":
+        return {"ok": True, "diterapkan": sinkron_terapkan(SK.gabung(sinkron_ekspor(), body))}
+    if path == "api/sinkron/token":
+        t = str(body.get("token") or "").strip()
+        if _exp_token(t) > _exp_token(read_token(TOKEN_PATH)):
+            token_tulis(t)
+            return {"ok": True, "diganti": True}
+        return {"ok": True, "diganti": False}
+    raise ValueError("Tidak ditemukan.")
+
+
+def _sinkron_http(peer: str, kunci: str, path: str, body=None, timeout: int = 120):
+    req = urllib.request.Request(f"{peer}/{path}", data=None if body is None else json.dumps(body, ensure_ascii=False).encode(),
+                                 method="GET" if body is None else "POST",
+                                 headers={"X-Sinkron-Kunci": kunci, "Content-Type": "application/json", "User-Agent": "RadarSinkron/1"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read() or b"null")
+
+
+def sinkron_sekali(awal: bool = False) -> dict:
+    """Satu putaran: berkas (tarik yang lebih baru di peer, kirim yang lebih baru di sini), data tim dua arah, token."""
+    peer, kunci = sinkron_peer(), sinkron_kunci()
+    if not (peer and kunci):
+        raise RuntimeError("Sinkron belum diatur (.sinkron-peer dan .sinkron-kunci).")
+    m = _sinkron_http(peer, kunci, "api/sinkron/manifest")
+    tarik, kirim = SK.rencana(SK.manifest(ROOT), m.get("berkas") or {})
+    for rel in tarik:
+        r = _sinkron_http(peer, kunci, "api/sinkron/berkas?p=" + urllib.parse.quote(rel))
+        if r.get("b64") is not None:
+            SK.tulis_atomik(ROOT / rel, base64.b64decode(r["b64"]), int(r["mtime"]))
+    _sinkron_segarkan(tarik)
+    for rel in kirim:
+        f = ROOT / rel
+        _sinkron_http(peer, kunci, "api/sinkron/berkas",
+                      {"p": rel, "mtime": int(f.stat().st_mtime), "b64": base64.b64encode(f.read_bytes()).decode()})
+    n = sinkron_terapkan(SK.gabung(sinkron_ekspor(), _sinkron_http(peer, kunci, "api/sinkron/data"), awal=awal))
+    n += int((_sinkron_http(peer, kunci, "api/sinkron/data", sinkron_ekspor()) or {}).get("diterapkan") or 0)
+    arah = SK.arah_token(_exp_token(read_token(TOKEN_PATH)), m.get("tokenExp"))
+    if arah == "tarik":
+        t = (_sinkron_http(peer, kunci, "api/sinkron/token") or {}).get("token")
+        if _exp_token(t) > _exp_token(read_token(TOKEN_PATH)):
+            token_tulis(t)
+    elif arah == "kirim":
+        _sinkron_http(peer, kunci, "api/sinkron/token", {"token": read_token(TOKEN_PATH)})
+    return {"ditarik": len(tarik), "dikirim": len(kirim), "data": n, "token": arah}
+
+
+def sinkron_jalan(awal: bool = False) -> dict:
+    if not _sinkron_lock.acquire(blocking=False):
+        return {"ok": False, "galat": "Sinkron sedang berjalan."}
+    try:
+        SINKRON_STATE["peer"] = sinkron_peer()
+        try:
+            SINKRON_STATE.update({"ok": True, "galat": "", **sinkron_sekali(awal)})
+        except Exception as e:
+            SINKRON_STATE.update({"ok": False, "galat": str(e)[:200]})
+            print(f"[sinkron] gagal: {e}", file=sys.stderr)
+        SINKRON_STATE["at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return {k: v for k, v in SINKRON_STATE.items() if k != "peer"}
+    finally:
+        _sinkron_lock.release()
+
+
+def sinkron_loop() -> None:
+    time.sleep(60)
+    while True:
+        if sinkron_peer() and sinkron_kunci():
+            sinkron_jalan()
+        time.sleep(SINKRON_GAP)
+
+
+def tender_data(cfg: dict, fresh: bool = False) -> dict:
+    """Daftar tender offer Stockbit (persentase minimal sesuai konfigurasi) ditambah emiten backdoor.include dari
+    corporate action masing-masing; galat Stockbit (NoToken/HTTPError) diteruskan ke pemanggil."""
+    res = stockbit_api(cfg["tenders"]["url"], fresh)
+    min_pct = float(cfg["tenders"].get("minPercent") or 0)
+    by = {}
+    for t in res.get("data", {}).get("tender") or []:
+        sym = str(t.get("company_symbol") or "")
+        if not re.match(r"^[A-Z]{4}$", sym):
+            continue
+        try:
+            if float(t.get("tender_percentage") or 0) < min_pct:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if sym not in by or str(t.get("tender_start") or "") > str(by[sym].get("start") or ""):
+            by[sym] = {"ticker": sym, "name": t.get("company_name"),
+                       "price": float(t.get("tender_price") or 0),
+                       "percent": float(t.get("tender_percentage") or 0),
+                       "shares": str(t.get("tender_shares") or ""),
+                       "start": str(t.get("tender_start") or ""),
+                       "end": str(t.get("tender_end") or ""),
+                       "paydate": str(t.get("tender_paydate") or ""),
+                       "active": bool(t.get("corp_action_active"))}
+    bd = cfg.get("backdoor") or {}
+    include = [s for s in (bd.get("include") or []) if re.match(r"^[A-Z]{4}$", str(s))]
+    for sym in include:
+        if sym in by:
+            by[sym]["confirmed"] = True
+            continue
+        entry = {"ticker": sym, "name": "", "confirmed": True}
+        try:
+            ca = stockbit_api(bd.get("corpactionUrl", "").replace("{ticker}", sym), fresh)
+            tos = sorted((a.get("action_info", {}).get("tenderoffer")
+                          for a in ca.get("data") or []
+                          if a.get("action_type") == "tenderoffer" and a.get("action_info")),
+                         key=lambda t: str(t.get("tender_start") or ""), reverse=True)
+            if tos:
+                to = tos[0]
+                entry.update({"name": to.get("company_name"),
+                              "price": float(to.get("tender_price") or 0),
+                              "percent": float(to.get("tender_percentage") or 0),
+                              "shares": str(to.get("tender_shares") or ""),
+                              "start": str(to.get("tender_start") or ""),
+                              "end": str(to.get("tender_end") or ""),
+                              "paydate": str(to.get("tender_paydate") or ""),
+                              "active": bool(to.get("corp_action_active"))})
+        except Exception:
+            pass
+        by[sym] = entry
+        time.sleep(0.3)
+    for x in bd.get("exclude") or []:
+        by.pop(str(x), None)
+    return {"items": list(by.values()), "exclude": bd.get("exclude") or []}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1478,7 +6807,8 @@ class Handler(BaseHTTPRequestHandler):
                 t = self.qs("ticker").upper()
                 deals = [d.split(":")[0] for d in self.qs("deals").upper().split(",") if d]
                 wanted = ([t] if t else []) + deals
-                _req.public_fetch = all(x in radar_tickers() for x in wanted)
+                _req.public_fetch = all(x in radar_tickers() for x in wanted) or (
+                    path in ("api/berita-saham", "api/pov-dalam", "api/quote", "api/harmonik", "api/ohlc") and bool(t) and t in bei_kode_load())
             if path.startswith("api/"):
                 self.handle_api(path, fresh)
                 return
@@ -1501,18 +6831,23 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         self.handle_write("DELETE")
 
-    def read_json(self):
+    def read_json(self, maks: int = MAX_BODY):
         """Body JSON penulisan. Content-Type wajib application/json: permintaan lintas situs
         dengan tipe ini selalu butuh preflight CORS, yang tidak dijawab server ini."""
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
             raise ValueError("Content-Type harus application/json.")
         n = int(self.headers.get("Content-Length") or 0)
-        if n > MAX_BODY:
+        if n > maks:
             raise ValueError("Body terlalu besar.")
         return json.loads(self.rfile.read(n) or b"null")
 
     def handle_write(self, method: str) -> None:
         try:
+            # Pasang kunci suara pria dari halaman Video (lihat tts_set_key: publik hanya sekali).
+            if urllib.parse.urlparse(self.path).path.strip("/") == "api/tts-key" and method == "POST" and self.is_local():
+                code, res = tts_set_key(self.read_json(), self.is_public(), self.headers.get("Cf-Connecting-Ip") or self.client_address[0])
+                self.reply_json(res, code)
+                return
             if self.is_public():
                 self.reply_json({"error": "Versi publik hanya baca."}, 403)
                 return
@@ -1521,14 +6856,25 @@ class Handler(BaseHTTPRequestHandler):
                 return
             path = urllib.parse.urlparse(self.path).path.strip("/")
             parts = path.split("/")
+            if path.startswith("api/sinkron/"):
+                if self.sinkron_tolak():
+                    return
+                self.reply_json(sinkron_post(path, self.read_json(SINKRON_MAKS_BODY)))
+                return
+            if path == "api/token" and method == "POST":
+                code, res = token_simpan(self.read_json())
+                self.reply_json(res, code)
+                return
             body = None if method == "DELETE" else self.read_json()
             if len(parts) == 3 and parts[:2] == ["api", "items"] and TICKER_RE.match(parts[2]):
                 t = parts[2]
                 if method == "DELETE":
                     data_exec("DELETE FROM items WHERE ticker=?", [(t,)])
+                    jejak_catat("items", t, hapus=True)
                     self.reply_json({"ok": True})
                 elif method == "PUT" and valid_item(body) and body["ticker"] == t:
                     item_put(body)
+                    jejak_catat("items", t)
                     self.reply_json({"ok": True})
                 else:
                     self.reply_json({"error": "Item tidak valid."}, 400)
@@ -1547,11 +6893,13 @@ class Handler(BaseHTTPRequestHandler):
                     data_exec("INSERT OR REPLACE INTO kandidat_hidden VALUES(?,?)", [(parts[3], int(time.time()))])
                 else:
                     data_exec("DELETE FROM kandidat_hidden WHERE ticker=?", [(parts[3],)])
+                jejak_catat("hidden", parts[3], hapus=method == "DELETE")
                 self.reply_json({"ok": True})
             elif (len(parts) == 3 and parts[:2] == ["api", "layout"] and TICKER_RE.match(parts[2])
                   and method == "PUT" and isinstance(body, dict)):
                 data_exec("INSERT OR REPLACE INTO layout VALUES(?,?)",
                           [(parts[2], json.dumps(body, ensure_ascii=False))])
+                jejak_catat("layout", parts[2])
                 self.reply_json({"ok": True})
             else:
                 self.reply_json({"error": "Tidak ditemukan."}, 404)
@@ -1565,16 +6913,17 @@ class Handler(BaseHTTPRequestHandler):
         # Hasil build Vue (dist/) didahulukan; file data JSON tetap dari ROOT.
         if path == "":
             path = "index.html"
-        f = None
+        f, rel = None, ()
         for base in (DIST, ROOT):
             cand = (base / path).resolve()
             if cand.is_relative_to(base) and cand.is_file():
-                f = cand
+                f, rel = cand, cand.relative_to(base).parts
                 break
         name = f.name if f else ""
         # Kode server/skrip (.py, .ps1), dotfile (token, kredensial, DB), dan config tidak pernah disajikan.
         # tsa-*.json tidak disajikan mentah; datanya lewat /api/tsa/<sumber> dan /api/tsa/summary.
-        blocked = (not f or name.startswith(".") or f.suffix.lower() in (".py", ".ps1", ".pyc")
+        # Folder titik (mis. .pov-dalam/) ikut diblokir, bukan hanya nama berkasnya.
+        blocked = (not f or any(x.startswith(".") for x in rel) or f.suffix.lower() in (".py", ".ps1", ".pyc")
                    or name == "stockbit.config.json" or (name.startswith("tsa-") and name.endswith(".json")))
         if blocked:
             self.reply(b"", 404)
@@ -1592,14 +6941,55 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(b"", 404)
 
     # ---- API
+    def sinkron_tolak(self) -> bool:
+        """Endpoint sinkron hanya untuk peer di jaringan pribadi (Tailscale/LAN) dengan kunci bersama yang sama.
+        Permintaan lewat domain publik (Cloudflare) selalu ditolak; tanpa berkas kunci, sinkron tidak aktif."""
+        kunci = sinkron_kunci()
+        if self.is_public() or not self.is_local() or not kunci:
+            self.reply_json({"error": "Tidak ditemukan."}, 404)
+            return True
+        if not hmac.compare_digest(kunci, self.headers.get("X-Sinkron-Kunci") or ""):
+            self.reply_json({"error": "Kunci sinkron salah."}, 403)
+            return True
+        return False
+
     def handle_api(self, path: str, fresh: bool) -> None:
         cfg = load_config()
         ticker = self.qs("ticker").upper()
 
-        if path == "api/items":
+        if path == "api/sinkron/sekarang":
+            # Jalankan sinkron sekarang (hanya dari komputer ini sendiri). ?awal=peer: sinkron pertama, data tim lama
+            # yang berbeda mengikuti peer.
+            if self.is_public() or not ipaddress.ip_address(self.client_address[0].replace("::ffff:", "")).is_loopback:
+                self.reply_json({"error": "Tidak ditemukan."}, 404)
+            else:
+                self.reply_json(sinkron_jalan(awal=self.qs("awal") == "peer"))
+            return
+        if path.startswith("api/sinkron/"):
+            if not self.sinkron_tolak():
+                self.reply_json(sinkron_get(path, self.qs("p")))
+            return
+
+        if path == "api/tts":
+            # Narasi video (suara pria). 204 = tidak tersedia; frontend lalu memakai suara browser.
+            audio = tts_audio(self.qs("t"), self.headers.get("Cf-Connecting-Ip") or self.client_address[0])
+            if not audio:
+                self.reply(b"", 204)
+                return
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "audio/mpeg")
+                self.send_header("Content-Length", str(len(audio)))
+                self.send_header("Cache-Control", "public, max-age=2592000, immutable")
+                self.end_headers()
+                self.wfile.write(audio)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        elif path == "api/items":
             self.reply_json(items_all())
         elif path == "api/updates":
-            self.reply_json(updates_all())
+            # Laporan keuangan tidak tampil di feed radar backdoor; dianalisa di tab IHSG -> LK Bagus (/api/lk).
+            self.reply_json(updates_unik([u for u in updates_all() if not LK_JUDUL_RX.search(str(u.get("title") or ""))]))
         elif path.startswith("api/layout/"):
             t = path.rsplit("/", 1)[1]
             if not TICKER_RE.match(t):
@@ -1613,6 +7003,9 @@ class Handler(BaseHTTPRequestHandler):
             exp = token_exp()
             self.reply_json({
                 "ok": True, "tokenLoaded": bool(get_token()), "tokenExp": exp,
+                "sinkronStockbit": NEWS_STATE.get("sbOk") or sync_state().get("sbOk"),
+                "tts": bool(tts_config()) and tts_usage()["karakter"] < TTS_MONTHLY_CHARS,
+                "watcher": watcher_status() | {"bawaan": dict(TOKEN_STATE)},
                 "deploy": deploy_status(),
                 "tokenStale": bool(exp and exp < time.time()),
                 "pageFallback": False,
@@ -1623,7 +7016,12 @@ class Handler(BaseHTTPRequestHandler):
                 "news": bool(cfg.get("news", {}).get("sources")) if cfg else False,
                 "tenders": bool(cfg.get("tenders", {}).get("url")) if cfg else False,
                 "stockbit1h": stats_1h(),
+                "galatStockbit": _galat[-8:],
                 "readOnly": is_public_request(),
+                "newsAt": NEWS_STATE["at"],
+                "hargaRadar": HARGA_STATE,
+                "povDalam": pd_cakupan(),
+                "sinkron": {k: v for k, v in SINKRON_STATE.items() if k != "peer"} | {"aktif": bool(sinkron_peer() and sinkron_kunci())},
             })
         elif path == "api/tenders":
             self.api_tenders(cfg, fresh)
@@ -1669,6 +7067,127 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError:
                 days = 1
             self.reply_json(get_diff(days))
+        elif path == "api/seasonality":
+            try:
+                month = min(12, max(1, int(self.qs("bulan") or 0) or datetime.now().month))
+                years = 5 if self.qs("tahun") == "5" else 10
+            except ValueError:
+                month, years = datetime.now().month, 10
+            self.reply_json(season_api(month, years))
+        elif path == "api/ihsg-runtun":
+            self.reply_json(runtun_api())
+        elif path == "api/ihsg-astro":
+            self.reply_json(astro_api())
+        elif path == "api/ramalan":
+            self.reply_json(ramalan_api())
+        elif path == "api/season-bukti":
+            try:
+                b = int(self.qs("bulan") or 0)
+                self.reply_json(season_bukti(b if 1 <= b <= 12 else None))
+            except Exception as e:
+                self.reply_json({"error": f"Uji bulan lalu belum bisa dihitung: {e}"})
+        elif path == "api/hsc-analisa":
+            try:
+                self.reply_json(hsc_analisa())
+            except Exception as e:
+                self.reply_json({"error": f"Analisa HSC belum bisa dihitung: {e}"})
+        elif path == "api/saham50":
+            self.reply_json(saham50_api())
+        elif path == "api/kode-bei":
+            nama = nama_semua()
+            self.reply_json({"kode": [{"t": t, "nama": nama.get(t, "")} for t in sorted(set(bei_kode_load()) | radar_tickers())]})
+        elif path == "api/kakdr-screen":
+            self.reply_json(kakdr_screen())
+        elif path == "api/pov-ah":
+            self.reply_json(ah_screen())
+        elif path == "api/rekomendasi":
+            self.reply_json(rekomendasi_api())
+        elif path == "api/audit-monitor":
+            self.reply_json(audit_monitor_api())
+        elif path == "api/harmonik":
+            t = self.qs("ticker").upper()
+            if not t:
+                self.reply_json(harmonik_api())
+            elif not TICKER_RE.match(t) or t not in bei_kode_load() and t not in radar_tickers():
+                self.reply_json({"error": "Kode saham tidak dikenal di BEI."}, 400)
+            else:
+                self.reply_json(harmonik_saham(t))
+        elif path == "api/pindai":
+            self.reply_json(pindai_api())
+        elif path == "api/pov-dalam":
+            t = self.qs("ticker").upper()
+            if not TICKER_RE.match(t) or t not in bei_kode_load() and t not in radar_tickers():
+                self.reply_json({"status": "gagal", "galat": "Kode saham tidak dikenal di BEI."})
+            else:
+                self.reply_json(pov_dalam_api(t, self.qs("mulai") == "1"))
+        elif path == "api/berita-saham":
+            t = self.qs("ticker").upper()
+            if not TICKER_RE.match(t):
+                self.reply_json({"error": "Kode saham harus 4 huruf."})
+            else:
+                self.reply_json(berita_saham_cache(t, fresh))
+        elif path == "api/lk":
+            self.reply_json(lk_api_cache())
+        elif path == "api/harga-saham":
+            self.reply_json(harga_semua())
+        elif path == "api/nama-saham":
+            self.reply_json(nama_semua())
+        elif path == "api/ihsg-live":
+            self.reply_json(live_api())
+        elif path == "api/ihsg-outlook":
+            try:
+                month = min(12, max(1, int(self.qs("bulan") or 0) or datetime.now().month))
+            except ValueError:
+                month = datetime.now().month
+            if self.qs("segar") == "1":
+                ihsg_segarkan(public=_req.public)
+            self.reply_json(ihsg_api(month))
+        elif path == "api/saham-detail":
+            kode = (self.qs("kode") or "").upper()
+            try:
+                month = min(12, max(1, int(self.qs("bulan") or 0) or datetime.now().month))
+            except ValueError:
+                month = datetime.now().month
+            if not re.match(r"^[A-Z]{4}$", kode):
+                self.reply_json({"error": "Kode saham tidak valid."}, 400)
+            else:
+                self.reply_json(saham_detail(kode, month))
+        elif path == "api/recovery":
+            try:
+                month = min(12, max(1, int(self.qs("bulan") or 0) or datetime.now().month))
+            except ValueError:
+                month = datetime.now().month
+            self.reply_json(recovery_api(month))
+        elif path == "api/broker-pola":
+            d = broker_data()
+            if not d:
+                self.reply_json({"error": "Data pola broker sedang disiapkan (pembaruan otomatis Senin-Sabtu pukul 00.01 WIB). Coba lagi beberapa menit lagi."})
+            else:
+                try:
+                    month = int(self.qs("bulan") or 0) or None
+                except ValueError:
+                    month = None
+                bro = (self.qs("broker") or "").upper()
+                jn = self.qs("jenis") if self.qs("jenis") in ("asing", "domestik") else ""
+                sym = (self.qs("saham") or "").upper()
+                harian = self.qs("harian") == "1"
+                if harian and not broker_harian_data().get("hari"):
+                    self.reply_json({"error": "Data harian sedang disiapkan (20 hari bursa terakhir, diperbarui tiap hari bursa setelah 16.45 WIB). Coba lagi beberapa menit lagi."})
+                elif harian and re.match(r"^[A-Z]{4}$", sym):
+                    self.reply_json({"saham": sym, "jenis": jn, "harian": True, "seri": BP.series_harian(broker_harian_data(), sym, broker_daftar(), jn)})
+                elif harian:
+                    tg = self.qs("tanggal") or ""
+                    self.reply_json(BP.view_harian(broker_harian_data(), tg if re.match(r"^\d{4}-\d\d-\d\d$", tg) else "", broker_daftar(), jn))
+                elif re.match(r"^[A-Z]{4}$", sym):
+                    self.reply_json({"saham": sym, "jenis": jn, "tahun": d.get("tahun"), "seri": BP.series(d, sym, jn)})
+                else:
+                    self.reply_json(BP.view(d, month, bro if re.match(r"^[A-Z0-9]{2}$", bro) else None, jn))
+        elif path == "api/seasonality-detail":
+            sym = (self.qs("kode") or "").upper()
+            d = SZ.detail(season_data(), sym, 5 if self.qs("tahun") == "5" else 10) if re.match(r"^[A-Z0-9]{3,10}$", sym) else None
+            self.reply_json(d or {"error": "Kode tidak ada di data seasonality."}, 200 if d else 404)
+        elif path == "api/pov":
+            self.reply_json(get_pov(fresh and not is_public_request()))
         elif path == "api/kandidat":
             if not self.guard_token():
                 res = get_kandidat(cfg, fresh)
@@ -1834,69 +7353,16 @@ class Handler(BaseHTTPRequestHandler):
             self.reply_json({"error": "Bagian tenders belum ada di stockbit.config.json."}, 500)
             return
         try:
-            res = stockbit_api(cfg["tenders"]["url"], fresh)
+            self.reply_json(tender_data(cfg, fresh))
         except NoToken:
             self.reply_json({"error": "Token belum diisi. Simpan di file .stockbit-token."}, 401)
-            return
         except urllib.error.HTTPError as e:
             if e.code == 401:
                 self.reply_json({"error": "Token ditolak Stockbit (kedaluwarsa?). Ambil token baru."}, 401)
             else:
                 self.reply_json({"error": f"Gagal memanggil Stockbit: HTTP {e.code}"}, 502)
-            return
         except Exception as e:
             self.reply_json({"error": f"Gagal memanggil Stockbit: {e}"}, 502)
-            return
-        min_pct = float(cfg["tenders"].get("minPercent") or 0)
-        by = {}
-        for t in res.get("data", {}).get("tender") or []:
-            sym = str(t.get("company_symbol") or "")
-            if not re.match(r"^[A-Z]{4}$", sym):
-                continue
-            try:
-                if float(t.get("tender_percentage") or 0) < min_pct:
-                    continue
-            except (TypeError, ValueError):
-                continue
-            if sym not in by or str(t.get("tender_start") or "") > str(by[sym].get("start") or ""):
-                by[sym] = {"ticker": sym, "name": t.get("company_name"),
-                           "price": float(t.get("tender_price") or 0),
-                           "percent": float(t.get("tender_percentage") or 0),
-                           "shares": str(t.get("tender_shares") or ""),
-                           "start": str(t.get("tender_start") or ""),
-                           "end": str(t.get("tender_end") or ""),
-                           "paydate": str(t.get("tender_paydate") or ""),
-                           "active": bool(t.get("corp_action_active"))}
-        bd = cfg.get("backdoor") or {}
-        include = [s for s in (bd.get("include") or []) if re.match(r"^[A-Z]{4}$", str(s))]
-        for sym in include:
-            if sym in by:
-                by[sym]["confirmed"] = True
-                continue
-            entry = {"ticker": sym, "name": "", "confirmed": True}
-            try:
-                ca = stockbit_api(bd.get("corpactionUrl", "").replace("{ticker}", sym), fresh)
-                tos = sorted((a.get("action_info", {}).get("tenderoffer")
-                              for a in ca.get("data") or []
-                              if a.get("action_type") == "tenderoffer" and a.get("action_info")),
-                             key=lambda t: str(t.get("tender_start") or ""), reverse=True)
-                if tos:
-                    to = tos[0]
-                    entry.update({"name": to.get("company_name"),
-                                  "price": float(to.get("tender_price") or 0),
-                                  "percent": float(to.get("tender_percentage") or 0),
-                                  "shares": str(to.get("tender_shares") or ""),
-                                  "start": str(to.get("tender_start") or ""),
-                                  "end": str(to.get("tender_end") or ""),
-                                  "paydate": str(to.get("tender_paydate") or ""),
-                                  "active": bool(to.get("corp_action_active"))})
-            except Exception:
-                pass
-            by[sym] = entry
-            time.sleep(0.3)
-        for x in bd.get("exclude") or []:
-            by.pop(str(x), None)
-        self.reply_json({"items": list(by.values()), "exclude": bd.get("exclude") or []})
 
     def api_reports(self, cfg, ticker: str, fresh: bool) -> None:
         if not cfg.get("reports"):
@@ -1960,6 +7426,19 @@ def main() -> int:
     daemon = threading.Thread(target=srv.serve_forever, daemon=False)
     daemon.start()
     threading.Thread(target=kandidat_loop, daemon=True).start()
+    threading.Thread(target=harga_loop, daemon=True).start()
+    threading.Thread(target=token_loop, daemon=True, name="token").start()
+    threading.Thread(target=pd_latar_loop, daemon=True, name="pov-dalam-latar").start()
+    threading.Thread(target=sinkron_loop, daemon=True, name="sinkron").start()
+    threading.Thread(target=news_loop, daemon=True).start()
+    threading.Thread(target=pov_loop, daemon=True).start()
+    threading.Thread(target=season_loop, daemon=True).start()
+    threading.Thread(target=ihsg_loop, daemon=True).start()
+    threading.Thread(target=live_loop, daemon=True).start()
+    threading.Thread(target=broker_harian_loop, daemon=True).start()
+    threading.Thread(target=ramalan_loop, daemon=True).start()
+    threading.Thread(target=lk_loop, daemon=True).start()
+    threading.Thread(target=saham50_loop, daemon=True).start()
     threading.Thread(target=snapshot_loop, daemon=True).start()
     threading.Thread(target=tsa_loop, daemon=True).start()
     print(f"Radar Backdoor berjalan di http://localhost:{args.port}")

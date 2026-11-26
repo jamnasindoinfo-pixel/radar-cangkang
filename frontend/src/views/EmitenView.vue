@@ -2,12 +2,14 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { store, itemOf, pandanganOf, storyOf, autoRefresh, loadStories, toggleCompare } from '../store.js'
-import { fmtDate, rp, scoreOf, statusOf, STATUS_LABEL } from '../lib/domain.js'
+import { fmtDate, rp, scoreOf, statusOf, STATUS_LABEL, tglHargaAcuan } from '../lib/domain.js'
 import SikapTag from '../components/SikapTag.vue'
 import StageTrack from '../components/StageTrack.vue'
 import OwnershipFlow from '../components/OwnershipFlow.vue'
 import TabRingkasan from '../components/emiten/TabRingkasan.vue'
 import TabStory from '../components/emiten/TabStory.vue'
+import TabAset from '../components/emiten/TabAset.vue'
+import PembaruanBanner from '../components/emiten/PembaruanBanner.vue'
 import TabAnalisa from '../components/emiten/TabAnalisa.vue'
 import TabTeknikal from '../components/emiten/TabTeknikal.vue'
 import TabSpekulasi from '../components/emiten/TabSpekulasi.vue'
@@ -16,22 +18,33 @@ import TabBerita from '../components/emiten/TabBerita.vue'
 import TabIntel from '../components/emiten/TabIntel.vue'
 import TabDownload from '../components/emiten/TabDownload.vue'
 import TabInsider from '../components/emiten/TabInsider.vue'
+import TabVideo from '../components/emiten/TabVideo.vue'
+import TabSlides from '../components/emiten/TabSlides.vue'
+import { SLIDE_TABS } from '../lib/slideTabs.js'
 import { api } from '../api.js'
 
 const props = defineProps({ ticker: { type: String, required: true } })
+// Tampilan tab: 'slide' (ringkas interaktif) atau 'lengkap' (teks penuh); pilihan diingat per perangkat.
+const view = ref((() => { try { return localStorage.getItem('emitenView') || 'slide' } catch { return 'slide' } })())
+watch(view, v => { try { localStorage.setItem('emitenView', v) } catch { /* penyimpanan tidak tersedia */ } })
+const slideOn = computed(() => view.value === 'slide' && SLIDE_TABS.includes(tab.value) && known.value)
 const route = useRoute()
 const router = useRouter()
 
 const TABS = [
+  // Urutan alur analisa: gambaran umum → perusahaan → pengendali → pergerakan → berita → nilai → waktu masuk
+  // → spekulasi → data pasar; Video dan Download merangkum semuanya (urutan presentasi mengikuti daftar ini).
   { id: 'ringkasan', name: 'Ringkasan' },
+  { id: 'profil', name: 'Profil' },
   { id: 'story', name: 'Story & Pengendali' },
+  { id: 'aset', name: 'Aset' },
   { id: 'insider', name: 'Insider Activity' },
+  { id: 'berita', name: 'Berita' },
   { id: 'analisa', name: 'Analisa' },
   { id: 'teknikal', name: 'Teknikal' },
   { id: 'spekulasi', name: 'Spekulasi' },
-  { id: 'profil', name: 'Profil' },
   { id: 'intel', name: 'Intel Pasar' },
-  { id: 'berita', name: 'Berita' },
+  { id: 'video', name: 'Video' },
   { id: 'download', name: 'Download' },
 ]
 
@@ -45,17 +58,19 @@ const valid = computed(() => /^[A-Z]{4}$/.test(T.value))
 // Tab yang hanya berisi data radar/story; untuk kode bebas ditulis "belum ada".
 const RADAR_ONLY = ['ringkasan', 'story']
 
-const tab = computed(() => TABS.some(t => t.id === route.query.tab) ? route.query.tab : known.value ? 'ringkasan' : 'analisa')
+// Saham di luar radar (hasil pencarian) hanya menampilkan berita terakhir dan analisanya.
+const TABS_TAMPIL = computed(() => known.value ? TABS : TABS.filter(t => t.id === 'berita'))
+const tab = computed(() => TABS_TAMPIL.value.some(t => t.id === route.query.tab) ? route.query.tab : known.value ? 'ringkasan' : 'berita')
 function pick(id) { router.replace({ query: { ...route.query, tab: id } }) }
 
 // Panah kiri/kanan, Home/End di daftar tab (pola tab WAI-ARIA, aktivasi otomatis).
 const tabEls = ref([])
 function onTabKey(e, i) {
-  const n = TABS.length
+  const n = TABS_TAMPIL.value.length
   const j = { ArrowRight: (i + 1) % n, ArrowLeft: (i - 1 + n) % n, Home: 0, End: n - 1 }[e.key]
   if (j === undefined) return
   e.preventDefault()
-  pick(TABS[j].id)
+  pick(TABS_TAMPIL.value[j].id)
   nextTick(() => tabEls.value[j]?.focus())
 }
 
@@ -85,10 +100,10 @@ const priceNote = computed(() => {
   }
   if (it?.price != null) {
     const at = it.updatedAt ? new Date(it.updatedAt).toLocaleString('id-ID', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : ''
-    const ref = p?.hargaAcuan != null && p.hargaAcuan !== it.price ? ` · acuan analisa ${rp(p.hargaAcuan)} (${fmtDate(p.asOf)})` : ''
+    const ref = p?.hargaAcuan != null && p.hargaAcuan !== it.price ? ` · acuan analisa ${rp(p.hargaAcuan)} (${fmtDate(tglHargaAcuan(p))})` : ''
     return `harga radar${at ? ', diperbarui ' + at : ''}${ref}`
   }
-  return p?.hargaAcuan != null ? `harga acuan analisa ${fmtDate(p.asOf)}` : 'belum ada harga'
+  return p?.hargaAcuan != null ? `harga acuan analisa ${fmtDate(tglHargaAcuan(p))}` : 'belum ada harga'
 })
 
 const score = computed(() => item.value ? scoreOf(item.value) : null)
@@ -167,18 +182,28 @@ watch(() => props.ticker, t => loadStories([t]).catch(() => {}))
         </nav>
       </div>
 
+      <!-- Laporan Stockbit baru sejak analisa/riset kurasi: tampil di semua tab agar tidak ada yang tertinggal. -->
+      <PembaruanBanner :ticker="T" />
+
       <div class="tabs" role="tablist" aria-label="Bagian emiten">
-        <button v-for="(t, i) in TABS" :key="t.id" :ref="el => (tabEls[i] = el)" type="button" role="tab" class="tab"
+        <button v-for="(t, i) in TABS_TAMPIL" :key="t.id" :ref="el => (tabEls[i] = el)" type="button" role="tab" class="tab"
           :id="'tab-' + t.id" :aria-selected="tab === t.id" :aria-controls="'panel-' + t.id" :tabindex="tab === t.id ? 0 : -1"
           @click="pick(t.id)" @keydown="onTabKey($event, i)">{{ t.name }}</button>
       </div>
 
+      <div v-if="SLIDE_TABS.includes(tab)" class="viewsw" role="group" aria-label="Tampilan">
+        <button type="button" class="pill sm" :aria-pressed="String(view === 'slide')" @click="view = 'slide'">Slide</button>
+        <button type="button" class="pill sm" :aria-pressed="String(view === 'lengkap')" @click="view = 'lengkap'">Lengkap</button>
+      </div>
       <div :id="'panel-' + tab" role="tabpanel" :aria-labelledby="'tab-' + tab" class="panel">
-        <p v-if="!known && RADAR_ONLY.includes(tab)" class="muted none">{{ T }} belum ada di radar, jadi {{ tab === 'story' ? 'story dan pengendali' : 'ringkasan transaksi' }} belum ada. Tab Analisa, Teknikal, Spekulasi, Profil, dan Berita tetap memakai data Stockbit.</p>
+        <TabSlides v-if="slideOn" :ticker="T" :tab="tab" @full="view = 'lengkap'" />
+        <p v-else-if="!known && RADAR_ONLY.includes(tab)" class="muted none">{{ T }} belum ada di radar, jadi {{ tab === 'story' ? 'story dan pengendali' : 'ringkasan transaksi' }} belum ada. Tab Analisa, Teknikal, Spekulasi, Profil, dan Berita tetap memakai data Stockbit.</p>
         <TabRingkasan v-else-if="tab === 'ringkasan'" :ticker="T" />
         <TabStory v-else-if="tab === 'story'" :ticker="T" @flow="openFlow" />
+        <TabAset v-else-if="tab === 'aset'" :ticker="T" />
         <TabInsider v-else-if="tab === 'insider'" :ticker="T" />
         <TabAnalisa v-else-if="tab === 'analisa'" :ticker="T" />
+        <TabVideo v-else-if="tab === 'video'" :ticker="T" />
         <TabTeknikal v-else-if="tab === 'teknikal'" :ticker="T" />
         <TabSpekulasi v-else-if="tab === 'spekulasi'" :ticker="T" @goto="pick" />
         <TabProfil v-else-if="tab === 'profil'" :ticker="T" />
@@ -193,6 +218,7 @@ watch(() => props.ticker, t => loadStories([t]).catch(() => {}))
 </template>
 
 <style scoped>
+.viewsw{display:flex;gap:6px;justify-content:flex-end;margin:8px 0 0}
 .em{display:flex;flex-direction:column;gap:16px;max-width:1200px}
 .back{font-size:13px;text-decoration:none;align-self:flex-start}
 .back:hover{text-decoration:underline}

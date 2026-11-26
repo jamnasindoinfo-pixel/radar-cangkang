@@ -414,9 +414,11 @@ function lineChart(doc, opt, data, labels, { x, y, w, h }, colors, font) {
 export async function deckToPdf(pres, jsPDF) {
   const L = pres._presLayout || pres.presLayout
   const W = L?.width ? L.width / 914400 : 10, H = L?.height ? L.height / 914400 : 5.625
-  const doc = new jsPDF({ orientation: 'landscape', unit: 'in', format: [W, H], compress: true })
+  // Orientasi mengikuti ukuran halaman (presentasi 16:9 = landscape, infografis poster A4 = portrait).
+  const ori = W >= H ? 'landscape' : 'portrait'
+  const doc = new jsPDF({ orientation: ori, unit: 'in', format: [W, H], compress: true })
   pres.slides.forEach((s, i) => {
-    if (i) doc.addPage([W, H], 'landscape')
+    if (i) doc.addPage([W, H], ori)
     const bg = s._background?.color || s.background?.color
     if (bg) { doc.setFillColor(hex(bg)); doc.rect(0, 0, W, H, 'F') }
     let ci = 0

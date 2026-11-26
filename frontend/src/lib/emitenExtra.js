@@ -144,14 +144,39 @@ export function peerMultiples(profiles) {
   }
 }
 
-// Nilai awal isian simulasi (Rp miliar per tahun, laba/pendapatan parsial disetahunkan).
+// Keterangan sumber kelipatan pembanding untuk slide simulasi. peersOk = pembanding yang profilnya terbaca;
+// di versi publik profil di luar radar ditolak, jadi daftar ini bisa kosong walau pembanding sudah ditentukan.
+export function peerNote({ peers = [], peersOk = [] } = {}) {
+  if (!peers.length) return 'Kelipatan pembanding: belum ditentukan.'
+  if (!peersOk.length) return `Kelipatan pembanding: data ${peers.join(', ')} tidak tersedia, jadi tidak dipakai.`
+  const miss = peers.filter(p => !peersOk.includes(p))
+  return `Kelipatan pembanding: median ${peersOk.length} emiten (${peersOk.join(', ')})` + (miss.length ? `; data ${miss.join(', ')} tidak tersedia.` : '.')
+}
+
+// Acuan nilai cadangan in-situ (USD per ton cadangan) dari transaksi akuisisi tambang sejenis di Indonesia.
+// Perkiraan kasar dan konservatif; dipakai otomatis agar simulasi tidak bergantung pada isian manual.
+export function autoUsdTon(aset) {
+  const a = aset?.aset || {}, tb = a.tambang || {}, s = `${a.sektor || ''} ${a.nama || ''} ${tb.kalori || ''} ${tb.cadangan || ''}`.toLowerCase()
+  if (/batu ?bara|coal/.test(s)) {
+    const kal = +((String(tb.kalori || '').match(/(\d[\d.]{2,})\s*kkal/) || [])[1] || '').replace(/\./g, '') || null
+    if (/kokas|coking|metalurgi/.test(s) || kal >= 6500) return { v: 3, note: 'acuan transaksi batu bara kalori tinggi/kokas ±USD3/ton' }
+    if (kal >= 5000 || /> ?5\.000/.test(s)) return { v: 1.5, note: 'acuan transaksi batu bara kalori menengah ±USD1,5/ton' }
+    return { v: 0.8, note: 'acuan transaksi batu bara kalori rendah ±USD0,8/ton' }
+  }
+  if (/nikel|nickel/.test(s)) return { v: 2, note: 'acuan transaksi bijih nikel ±USD2/ton' }
+  if (/bauksit|bijih besi|iron ore/.test(s)) return { v: 1, note: 'acuan transaksi bijih mineral ±USD1/ton' }
+  return null
+}
+
+// Nilai awal simulasi (Rp miliar per tahun, laba/pendapatan parsial disetahunkan). Semua otomatis dari data aset;
+// kelipatan pembanding diisi dari median emiten pembanding Stockbit (peerMultiples) oleh pemanggil.
 export function simDefaults(aset, sv) {
   const fin = aset?.aset?.keuangan || {}, af = annualFactor(fin.periode), ann = v => v == null ? null : v * af
-  const res = reservesOf(aset?.aset?.tambang)
+  const res = reservesOf(aset?.aset?.tambang), ut = res ? autoUsdTon(aset) : null
   return {
     tx: toM(txValue(aset, sv)), porsi: pctOf(aset?.aset?.porsi) ?? pctOf(sv?.injectTarget) ?? 100,
     laba: toM(ann(fin.labaBersih)), pend: toM(ann(fin.pendapatan)), eq: toM(fin.ekuitas),
-    res: res?.mt ?? null, usdTon: null, per: null, ps: null, pbv: null, af,
+    res: res?.mt ?? null, usdTon: ut?.v ?? null, usdTonNote: ut?.note || '', per: null, ps: null, pbv: null, af,
   }
 }
 
@@ -312,21 +337,21 @@ export function ctrlProsCons({ profil, pv, c, active = [], exited = [], radarTic
 export function deepView(a, { profil, aset, bm, verified, now } = {}) {
   const dl = a.pa?.dilusi || {}, k = aset?.kjpp || {}, out = []
   const who = profil?.ringkas || (a.pv?.siapa ? sentences(a.pv.siapa)[0] : '')
-  if (who) out.push(['Siapa pengendalinya dan apa motifnya', `${who}${a.pv?.rencana ? ' Rencana yang dinyatakan: ' + sentences(a.pv.rencana)[0] : ''}`])
+  if (who) out.push(['Pengendali dan motifnya', `${who}${a.pv?.rencana ? ' Rencana yang dinyatakan: ' + sentences(a.pv.rencana)[0] : ''}`])
   if (aset || a.sv?.injectType) {
     const val = aset?.transaksi?.nilaiRp ?? a.injRp, ratio = val && a.mcap ? val / a.mcap : null
     const kj = k.status === 'terbit' ? `Penilaian KJPP sudah terbit${k.nilaiRp ? ' (' + big(k.nilaiRp) + ')' : ''}.`
       : k.status === 'ditunjuk' ? 'KJPP sudah ditunjuk, laporannya belum terbit, jadi nilainya belum teruji.'
       : 'Belum ada penilai independen; nilainya masih klaim.'
     const hub = profil?.afiliasi?.hubungan ? ' Hubungan penjual: ' + sentences(profil.afiliasi.hubungan)[0] : ''
-    out.push(['Apa yang masuk dan berapa harganya', `${aset?.aset?.nama || a.sv?.injectTarget || a.sv?.injectType}${aset?.aset?.sektor ? ' (' + aset.aset.sektor + ')' : ''}${val ? ` senilai ${big(val)}` : ', nilainya belum diungkap'}${ratio ? `, setara ${x2(ratio)} kapitalisasi ${a.t}` : ''}. ${kj}${hub}`])
+    out.push(['Aset yang masuk dan nilainya', `${aset?.aset?.nama || a.sv?.injectTarget || a.sv?.injectType}${aset?.aset?.sektor ? ' (' + aset.aset.sektor + ')' : ''}${val ? ` senilai ${big(val)}` : ', nilainya belum diungkap'}${ratio ? `, setara ${x2(ratio)} kapitalisasi ${a.t}` : ''}. ${kj}${hub}`])
   }
   const entry = String(a.pv?.siapa || '').match(/Rp\s?([\d.,]+)\s*(?:\/|per)\s*saham/i)
   const benefit = [entry && `Pengendali masuk di Rp${entry[1]} per saham`, a.tender?.price && `PTW ${rp(a.tender.price)}`, a.price && `harga kini ${rp(a.price)}`].filter(Boolean).join(', ')
   if (benefit || dl.berlaku) {
     const dil = dl.berlaku && dl.porsiPublikSetelah != null
       ? ` Bila publik tidak ikut menebus, porsinya turun dari ${fmt(dl.porsiPublikSekarang ?? a.flt ?? 0, 1)}% ke ${fmt(dl.porsiPublikSetelah, 1)}%${dl.nilaiPerSaham ? `, dengan nilai buku per saham pasca-transaksi sekitar ${rp(dl.nilaiPerSaham)}` : ''}.` : ''
-    out.push(['Siapa yang diuntungkan struktur transaksi', `${benefit}${benefit ? '.' : ''}${dil} Selisih harga masuk pengendali dan harga pasar adalah keuntungan yang sudah dikunci pengendali sebelum aset terbukti.`.trim()])
+    out.push(['Pihak yang diuntungkan oleh struktur transaksi', `${benefit}${benefit ? '.' : ''}${dil} Selisih harga masuk pengendali dan harga pasar adalah keuntungan yang sudah dikunci pengendali sebelum aset terbukti.`.trim()])
   }
   const cy = cycleOf(a, { bm, aset, verified, now })
   if (cy) {
@@ -337,7 +362,7 @@ export function deepView(a, { profil, aset, bm, verified, now } = {}) {
     out.push(['Posisi dalam siklus backdoor', `${daysSince(a.d.tender.start, now)} hari sejak PTW dimulai; harga kini ${x2(a.deal.last / a.deal.p0)} harga saat PTW.`])
   }
   const salah = a.pa?.tesisSalahBila || [], kunci = a.pa?.variabelKunci || []
-  if (salah.length || kunci.length) out.push(['Yang bisa membuat tesis salah dan yang harus dipantau', `${salah.join('; ')}${kunci.length ? `${salah.length ? '. ' : ''}Pantau: ${kunci.join('; ')}` : ''}.`])
+  if (salah.length || kunci.length) out.push(['Kondisi yang menggugurkan tesis dan hal yang perlu dipantau', `${salah.join('; ')}${kunci.length ? `${salah.length ? '. ' : ''}Pantau: ${kunci.join('; ')}` : ''}.`])
   return out
 }
 

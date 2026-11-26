@@ -57,6 +57,8 @@ export const MS_STAGE = [['bisnis', 'selesai'], ['inbreng', 'injeksi'], ['kjpp',
   ['to_selesai', 'tender'], ['to_umum', 'tender'], ['akuisisi', 'tender'], ['spa', 'spa']]
 export const stageFromMs = ms => (MS_STAGE.find(([m]) => (ms || {})[m]) || [])[1]
 export const stageOf = d => stageFromMs(d.ms) || d.stage || 'radar'
+// Tanggal harga acuan pandangan analis: hargaAsOf bila analisa diperbarui dari laporan baru tanpa menghitung ulang harga.
+export const tglHargaAcuan = pa => pa?.hargaAsOf || pa?.asOf || ''
 
 // Akuisisi strategis tanpa rencana injeksi (story terverifikasi: tanpa injectType, usaha "Tetap ...").
 const noInjectOf = v => !!v && !v.injectType && /^Tetap/i.test(v.baru || '')
@@ -118,7 +120,9 @@ export function posisiOf(d, p, { verified = {} } = {}) {
     const nm = MILESTONES.find(m => !ms[m.id] && !(m.id === 'kjpp' && !v?.injectType))
     if (nm) next = nm.label
     const tgt = v?.target || (d.tender?.end && !ms.to_selesai ? 'PTW s.d. ' + fmtDate(d.tender.end.slice(0, 10)) : '')
-    if (tgt) next += (next ? ' · target: ' : '') + String(tgt).split(/[.;]/)[0].slice(0, 90)
+    // Klausa pertama target; bila panjang, tanpa keterangan dalam kurung (tidak dipotong di tengah kata).
+    const t1 = String(tgt).split(/[.;]/)[0].trim()
+    if (tgt) next += (next ? ' · target: ' : '') + (t1.length <= 90 ? t1 : t1.replace(/\s*\(.*$/, ''))
   }
   return { now, next }
 }
@@ -191,3 +195,11 @@ export function isNewSince(u, seenAt) {
 
 // Warna tag sikap analis; dipakai SikapTag dan Berita supaya sama di semua halaman.
 export const SIKAP_CLS = { 'Hindari': 't-strong', 'Spekulatif tinggi': 't-warn', 'Netral': 't-calm', 'Asimetri positif': 't-good' }
+
+// Kelengkapan jawaban emiten atas tiap pertanyaan BEI (ri-dokumen.json → penjelasanBursa.poin[].jawaban):
+// ukuran yang dapat dicek langsung di dokumen, terpisah dari pendapat analis (kolom Analisa).
+export const PB_JAWABAN = { lengkap: ['Lengkap', 'good'], sebagian: ['Sebagian', 'calm'], tidak: ['Tidak dijawab', 'strong'] }
+// Nada objektif per butir (poin[].nada) dan dasarnya (poin[].dasar).
+export const PB_NADA = { positif: ['Positif', 'good'], netral: ['Netral', 'calm'], negatif: ['Negatif', 'strong'] }
+export const PB_DASAR = { ditunda: 'Tidak dijawab/ditunda', merugikan: 'Fakta merugikan dari emiten', fakta: 'Fakta/kepatuhan', kepastian: 'Menambah kepastian', terbuka: 'Pengungkapan spesifik' }
+export const PB_KRITERIA = 'Dasar nada (objektif, dari isi dokumen): Negatif bila pertanyaan BEI tidak dijawab atau ditunda, atau emiten sendiri menyatakan fakta yang merugikan publik; Positif bila jawaban mengungkap data spesifik baru (angka, nama, rincian), memberi kepastian, atau perlindungan bagi publik; Netral untuk fakta, prosedur, atau kepatuhan aturan, termasuk hubungan dan transaksi afiliasi. Kolom Analisa adalah pendapat analis.'

@@ -27,7 +27,7 @@ export function newReason(item, { verified = {} } = {}) {
     const evs = sigs.flatMap(s => (item.signals?.[s.id]?.ev || []).filter(e => e?.text))
       .sort((a, b) => String(b.d || '').localeCompare(String(a.d || '')))
     if (sigs.length) parts.push(sigs.map(s => s.short).join(', '))
-    else if (item.auto) parts.push('kandidat otomatis')
+    else if (item.auto) parts.push(item.autoJenis === 'rencana' ? 'rencana pengambilalihan (otomatis)' : 'kandidat otomatis')
     const ev = evs[0]
     if (ev) parts.push(cut(ev.text) + (ev.d ? ` (${dShort(ev.d)})` : ''))
     else if (item.notes) parts.push(cut(String(item.notes).split(/(?<=\.)\s/)[0]))

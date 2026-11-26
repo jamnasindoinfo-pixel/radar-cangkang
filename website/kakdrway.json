@@ -1,0 +1,40 @@
+{
+  "_info": "Ringkasan metode KakdrWay dari kakdr.com (artikel Syarat & Screening Standard dan 4 4 4), disusun 23 Okt 2026. Isi adalah rangkuman, bukan salinan; tautan menuju artikel asli.",
+  "sumber": "https://kakdr.com/",
+  "julukan": "Penangkap pisau jatuh anti cut loss",
+  "screening": [
+    { "k": "A. Pisau jatuh", "isi": "Harga sudah turun minimal 50% dari harga tertingginya; makin dalam makin baik." },
+    { "k": "B1. PBV < 1", "isi": "Makin kecil makin baik. PBV di atas 1 masih diterima bila dividend yield ≥ 2× PBV." },
+    { "k": "B2. DER < 1", "isi": "DER di atas 1 masih diterima bila ROE ≥ 10× DER (tidak berlaku untuk bank dan asuransi)." },
+    { "k": "B3. ROE positif", "isi": "Makin besar makin baik." },
+    { "k": "C. Dividen rutin", "isi": "Dividen dianggap ongkos tunggu selama harga belum naik; emiten tanpa dividen harus punya alasan kuat." },
+    { "k": "D. Syarat mutlak", "isi": "Beli semampu siap hilang, memakai uang dingin, dan sabar karena lama naik-turun harga tidak pasti." }
+  ],
+  "skor": "Skor KakdrWay di atas 6,5 dianggap aman (alat: tool.kakdr.com/analisa-cepat-kakdrway).",
+  "kelola": [
+    "Bila rugi mengambang: averaging down bertahap 33,3%, dicatat terpisah untuk keperluan take profit.",
+    "Bila untung mengambang: take profit bertahap TP1, TP2, TP3.",
+    "Bila harga turun lagi setelah take profit: buyback 33%.",
+    "Selama menunggu averaging down atau take profit, dividen menjadi pendapatan."
+  ],
+  "siklus444": [
+    { "fase": "Bulan 1–4 setelah cum date", "isi": "Jangan menangkap harga yang turun; kecenderungan naik 1 turun 2." },
+    { "fase": "Bulan 5–8", "isi": "Fase sideways: mulai beli sedikit demi sedikit sesuai kemampuan dana." },
+    { "fase": "Bulan 9 hingga pengumuman dividen", "isi": "Tahan; harga cenderung naik. Putuskan tetap memegang (bila yield besar) atau take profit lebih dulu." }
+  ],
+  "terhadapBackdoor": [
+    "Saham backdoor di radar umumnya gagal syarat B dan C: merugi, ekuitas kecil atau negatif, PBV tinggi, dan tanpa dividen, sehingga tidak lolos screening KakdrWay.",
+    "Kekuatan KakdrWay ada pada disiplin dana dan kesabaran; bagi saham backdoor yang spekulatif, syarat D (uang dingin, semampu hilang) tetap relevan.",
+    "Strategi averaging down KakdrWay dirancang untuk emiten berdividen dengan fundamental sehat; menerapkannya pada saham cangkang tanpa aset berisiko memperbesar kerugian."
+  ],
+  "artikel": [
+    { "d": "2023-02-26", "judul": "KakdrWay – 4 4 4", "url": "https://kakdr.com/kakdrway-4-4-4/" },
+    { "d": "2023-01-08", "judul": "KakdrWay – Syarat & Screening Standard", "url": "https://kakdr.com/kakdrway-syarat-screening-standard/" },
+    { "d": "2021-01-11", "judul": "KakdrWay – Tahukah Kak?", "url": "https://kakdr.com/kakdrway-tahukah-kak/" },
+    { "d": "2024-11-27", "judul": "Kalkulator PUPS ADRO AADI", "url": "https://kakdr.com/kalkulator-pups-adro-aadi/" },
+    { "d": "2024-11-26", "judul": "Cerita Ngesot ADRO – Dengan Target 100% Dividen Yield", "url": "https://kakdr.com/cerita-ngesot-adro-dengan-target-100-dividen-yield/" },
+    { "d": "2024-11-06", "judul": "Cerita RICY & JIHD", "url": "https://kakdr.com/cerita-ricy-jihd/" },
+    { "d": "2024-11-04", "judul": "Cerita RALS (November 2024)", "url": "https://kakdr.com/cerita-rals-november-2024/" },
+    { "d": "2024-10-29", "judul": "Menghitung Potensi Dividen BJTM 2025", "url": "https://kakdr.com/menghitung-potensi-dividen-bjtm-2025/" }
+  ]
+}

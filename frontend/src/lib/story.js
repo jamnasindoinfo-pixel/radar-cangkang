@@ -138,15 +138,18 @@ export function deriveStory(d, { verified = {}, updates = [] } = {}) {
     injType, injCo, verified: !!v, vSrc, vNote: v?.note || "",
     lama: man.lama || lamaAuto, lamaNote: man.lama ? "" : lamaNote, lamaEdited: !!man.lama,
     baru: man.baru || (v ? v.baru : baruAuto), baruSrc: man.baru ? null : (v ? (v.baru ? vSrc : null) : (bizRep || null)), baruEdited: !!man.baru,
-    oldName: man.oldName || (a.oldControllers || []).map(o => o.name).slice(0, 3).join(", "),
-    oldPct: man.oldPct != null && man.oldPct !== "" ? +man.oldPct : (a.oldControllers || []).slice(0, 3).reduce((s, o) => s + (o.before || 0), 0) || null,
-    oldInferred: !man.oldName && !!old?.inferred, oldEdited: !!man.oldName,
-    takeoverDate: a.takeover?.date,
+    oldName: man.oldName || v?.oldName || (a.oldControllers || []).map(o => o.name).slice(0, 3).join(", "),
+    oldPct: man.oldPct != null && man.oldPct !== "" ? +man.oldPct : v?.oldPct != null ? +v.oldPct
+      : (a.oldControllers || []).slice(0, 3).reduce((s, o) => s + (o.before || 0), 0) || null,
+    oldInferred: !man.oldName && !v?.oldName && !!old?.inferred, oldEdited: !!man.oldName,
+    takeoverDate: v?.takeoverDate || a.takeover?.date,
     // Terverifikasi: injeksi hanya bila memang disebut di laporan; detail = kalimat laporan terbaru bila ada.
     inject: man.inject || (v ? (v.injectType ? (injAuto || [v.injectType, v.injectTarget].filter(Boolean).join(" · ")) : "") : injAuto),
     injectEdited: !!man.inject, injectSrc: man.inject ? null : (v ? vSrc : (injRep || null)),
     nominal: man.nominal || (nominal ? nominal.txt : ""), nominalEdited: !!man.nominal,
-    target: man.target || targetAuto || (d.prog?.next ? "Belum ada jadwal · berikutnya: " + d.prog.next.label : "Transaksi tuntas"), targetEdited: !!man.target,
+    // "Transaksi tuntas" hanya bila progres memang 100%; emiten tahap awal tanpa tonggak berikutnya belum punya jadwal.
+    target: man.target || targetAuto || (d.prog?.next ? "Belum ada jadwal · berikutnya: " + d.prog.next.label
+      : (d.prog?.pct ?? 0) >= 100 ? "Transaksi tuntas" : "Belum ada jadwal transaksi"), targetEdited: !!man.target,
     loaded: !!d.storyAuto,
   };
 }

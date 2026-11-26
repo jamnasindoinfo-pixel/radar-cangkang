@@ -2,10 +2,11 @@
 import { computed, reactive, shallowRef, ref, watch } from 'vue'
 import { api } from '../../api.js'
 import { store, getBenchmark } from '../../store.js'
-import { buildAnalysis, KURS } from '../../lib/analysis.js'
-import { fmt, fmtDate, rp, big, x2, pctTxt } from '../../lib/domain.js'
+import { buildAnalysis, KURS, W } from '../../lib/analysis.js'
+import { fmt, fmtDate, rp, big, x2, pctTxt, tglHargaAcuan } from '../../lib/domain.js'
 import { riCase } from '../../lib/rightsIssue.js'
 import RightsIssue from './RightsIssue.vue'
+import RiDokumen from './RiDokumen.vue'
 import { analysisProsCons, deepView, dilusi, radarGeom } from '../../lib/emitenExtra.js'
 import SikapTag from '../SikapTag.vue'
 import ProsCons from './ProsCons.vue'
@@ -13,11 +14,20 @@ import ProfilOrang from './ProfilOrang.vue'
 import ControllerTrack from './ControllerTrack.vue'
 import NetworkMap from '../NetworkMap.vue'
 import { errText } from './ta/useOhlc.js'
+import { dokumenBaru } from '../../lib/docWatch.js'
 
 const props = defineProps({ ticker: String })
+// Keterbukaan material yang terbit setelah analisa dokumen terakhir (otomatis dari sinkron Stockbit Reports).
+const docNew = computed(() => dokumenBaru(props.ticker, store.updates, store.riDoc?.[props.ticker]))
 const loading = ref(true), error = ref(''), A = shallowRef(null), bm = shallowRef(null), ctrl = shallowRef(null)
-// Bobot dimensi (sama dengan sintesis skor di lib/analysis.js).
-const W = { 'Pengendali': 0.25, 'Substansi aset': 0.25, 'Posisi harga': 0.2, 'Struktur & likuiditas': 0.1, 'Katalis': 0.1, 'Fundamental': 0.1 }
+// Rincian hitung: klik skor = tabel bobot; klik dimensi = langkah nilai dimensi itu.
+const showCalc = ref(false), openDim = ref('')
+const total = computed(() => (A.value?.dims || []).reduce((s, d) => s + d.s * W[d.k], 0))
+const sgn = v => (v > 0 ? '+' : v < 0 ? '−' : '') + fmt(Math.abs(v), 1)
+function pickDim(k) {
+  openDim.value = openDim.value === k ? '' : k
+  if (openDim.value) setTimeout(() => document.getElementById('dim-' + k.replace(/\W+/g, '-'))?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 0)
+}
 const HI_SIGNAL = /(transaksi material|perubahan kegiatan usaha|inbreng|HMETD|penilai|akuisisi|pengambilalihan|tender|RUPS|private placement|penempatan terbatas)/i
 const NOISE = /(volatilitas|permintaan penjelasan bursa)/i
 
@@ -95,7 +105,9 @@ const KC = [
 ]
 // Analisa PMHMETD/PMTHMETD bila ada rencana penambahan modal.
 const ri = computed(() => A.value ? riCase(A.value, { aset: store.aset[props.ticker], sv: store.verified[props.ticker],
-  item: store.items.find(x => x.ticker === props.ticker), reports: A.value.reps }) : null)
+  item: store.items.find(x => x.ticker === props.ticker), pv: store.pengendali[props.ticker], doc: store.riDoc?.[props.ticker],
+  // Semua keterbukaan & berita emiten (bukan hanya 8 terakhir) untuk menilai tahap dan keterbukaan terakhir.
+  reports: [...A.value.reps, ...store.updates.filter(u => u.ticker === props.ticker)] }) : null)
 const holders = computed(() => (A.value?.holders || []).filter(h => Math.abs(h.change) >= 0.1 || A.value.isCtrlH(h)).slice(0, 8))
 // Infografis: radar enam dimensi, kelebihan vs kekurangan, sudut pandang mendalam.
 const extra = computed(() => ({ profil: store.profil[props.ticker], aset: store.aset[props.ticker], hsc: store.hsc?.kode || [],
@@ -111,12 +123,33 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
   <p v-if="loading" class="load muted">Menganalisa {{ ticker }}: memuat profil, harga, dan keterbukaan informasi dari Stockbit…</p>
   <div v-else-if="error" class="err"><strong>Analisa {{ ticker }} gagal dimuat</strong><span>{{ error }}. Pastikan website dibuka lewat jalankan-radar.sh dan token Stockbit masih berlaku.</span></div>
   <div v-else-if="A" class="an">
+    <aside v-if="docNew.length" class="docnew" role="status">
+      <b>{{ docNew.length }} keterbukaan material belum masuk analisa dokumen</b>
+      <span class="muted small">{{ store.riDoc?.[ticker]?.asOf ? 'terbit setelah analisa dokumen ' + fmtDate(store.riDoc[ticker].asOf) : 'emiten belum punya analisa dokumen (120 hari terakhir)' }}</span>
+      <ul class="small"><li v-for="u in docNew.slice(0, 6)" :key="u.id">{{ fmtDate(String(u.date).slice(0, 10)) }} · <a v-if="u.url" :href="u.url" target="_blank" rel="noopener">{{ u.title }}</a><template v-else>{{ u.title }}</template></li></ul>
+    </aside>
     <!-- Skor & sikap: satu baris tegas. -->
     <section class="verdict rule-top">
       <p class="vline">
-        <b class="cond score" :class="'c-' + STANCE[A.stance.id]">{{ A.score }}</b><span class="cond muted of">/100</span>
+        <button type="button" class="scorebtn" :aria-expanded="String(showCalc)" title="Klik untuk melihat perhitungan skor" @click="showCalc = !showCalc">
+          <b class="cond score" :class="'c-' + STANCE[A.stance.id]">{{ A.score }}</b><span class="cond muted of">/100</span>
+        </button>
         <strong :class="'c-' + STANCE[A.stance.id]">{{ A.stance.t }}</strong>
+        <button type="button" class="linkbtn small" @click="showCalc = !showCalc">{{ showCalc ? 'Tutup perhitungan' : 'Lihat perhitungan skor' }}</button>
       </p>
+      <div v-if="showCalc" class="calc">
+        <table class="ledger">
+          <thead><tr><th>Dimensi</th><th class="num">Nilai (0–10)</th><th class="num">Bobot</th><th class="num">Kontribusi</th></tr></thead>
+          <tbody>
+            <tr v-for="d in A.dims" :key="d.k" class="clk" @click="pickDim(d.k)">
+              <td><button type="button" class="linkbtn">{{ d.k }}</button></td>
+              <td class="num">{{ fmt(d.s, 1) }}</td><td class="num">× {{ Math.round(W[d.k] * 100) }}%</td><td class="num">= {{ fmt(d.s * W[d.k], 3) }}</td>
+            </tr>
+          </tbody>
+          <tfoot><tr><th colspan="3">Jumlah × 10 (dibulatkan)</th><th class="num">{{ fmt(total, 3) }} × 10 = {{ A.score }}</th></tr></tfoot>
+        </table>
+        <p class="small muted">Kesimpulan: ≥ 65 asimetri positif · 45–64 netral · &lt; 45 spekulatif tinggi. Klik nama dimensi untuk melihat langkah hitungnya.</p>
+      </div>
       <p class="small muted">
         <template v-if="A.p.sector || A.p.industry">{{ [A.p.sector, A.p.industry].filter(Boolean).join(' · ') }} · </template>
         Harga {{ rp(A.price) }}<template v-if="A.priceDate"> (penutupan {{ fmtDate(A.priceDate) }})</template>
@@ -162,7 +195,9 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
       </div>
       <p v-if="A.pa.pengendaliBergerak" class="small"><b>Pergerakan pengendali:</b> {{ A.pa.pengendaliBergerak }}</p>
       <p v-if="A.pa.likuiditas" class="small"><b>Likuiditas:</b> {{ A.pa.likuiditas }}</p>
-      <p class="small muted">Pandangan analis per {{ fmtDate(A.pa.asOf || '') }}<template v-if="A.pa.hargaAcuan"> · harga acuan {{ rp(A.pa.hargaAcuan) }}</template>. Kerangka berpikir, bukan rekomendasi beli/jual.</p>
+      <div v-if="(A.pa.pembaruan || []).length" class="small"><b>Pembaruan {{ fmtDate(A.pa.asOf || '') }}:</b>
+        <ul><li v-for="x in A.pa.pembaruan" :key="x">{{ x }}</li></ul></div>
+      <p class="small muted">Pandangan analis per {{ fmtDate(A.pa.asOf || '') }}<template v-if="A.pa.hargaAcuan"> · harga acuan {{ rp(A.pa.hargaAcuan) }}<template v-if="A.pa.hargaAsOf"> per {{ fmtDate(tglHargaAcuan(A.pa)) }}</template></template>. Kerangka berpikir, bukan rekomendasi beli/jual.</p>
     </section>
 
     <section class="rule-top">
@@ -179,12 +214,12 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
             <polygon v-for="(ring, i) in radar.rings" :key="i" class="ring" :points="ring" />
             <line v-for="([x, y], i) in radar.axes" :key="'x' + i" class="ax" :x1="radar.cx" :y1="radar.cy" :x2="x" :y2="y" />
             <polygon class="area" :points="radar.area" />
-            <g v-for="d in radar.dots" :key="d.k">
+            <g v-for="d in radar.dots" :key="d.k" class="clk" @click="pickDim(d.k)">
               <circle :class="'d-' + tone(d.s)" :cx="d.x" :cy="d.y" r="4.5" />
               <text class="rl" :x="d.lx" :y="d.ly" :text-anchor="d.anchor">{{ d.k.split(' ')[0] }} <tspan class="rv">{{ fmt(d.s, 1) }}</tspan></text>
             </g>
           </svg>
-          <figcaption class="small muted">Peta skor enam dimensi, 0 di tengah sampai 10 di tepi.</figcaption>
+          <figcaption class="small muted">Peta skor enam dimensi, 0 di tengah sampai 10 di tepi. Klik nilai untuk melihat perhitungannya.</figcaption>
         </figure>
         <ProsCons v-if="pc" :pros="pc.pros" :cons="pc.cons" />
       </div>
@@ -202,11 +237,23 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
       <h2>Penilaian enam dimensi</h2>
       <div class="dims">
         <div class="axis" aria-hidden="true"><span></span><span class="sc"><i style="left:0">0</i><i style="left:50%">5</i><i style="left:100%">10</i></span><span></span></div>
-        <div v-for="d in A.dims" :key="d.k" class="dim">
-          <span class="dk"><b>{{ d.k }}</b> <span class="muted small">bobot {{ Math.round(W[d.k] * 100) }}%</span></span>
+        <div v-for="d in A.dims" :id="'dim-' + d.k.replace(/\W+/g, '-')" :key="d.k" class="dim">
+          <span class="dk"><button type="button" class="dimbtn" :aria-expanded="String(openDim === d.k)" @click="pickDim(d.k)"><b>{{ d.k }}</b> <span class="muted small">bobot {{ Math.round(W[d.k] * 100) }}% · {{ openDim === d.k ? 'tutup' : 'lihat hitungan' }}</span></button></span>
           <span class="track" role="meter" :aria-label="d.k" aria-valuemin="0" aria-valuemax="10" :aria-valuenow="d.s"><i :class="'b-' + tone(d.s)" :style="{ width: d.s * 10 + '%' }"></i></span>
           <span class="ds cond">{{ fmt(d.s, 1) }}</span>
           <p v-if="d.why.length" class="why small muted">{{ d.why.join(' ') }}</p>
+          <div v-if="openDim === d.k" class="steps small">
+            <table>
+              <tbody>
+                <tr v-for="(st, i) in d.steps || []" :key="i">
+                  <td>{{ st.t }}</td>
+                  <td class="num"><b v-if="st.set != null">= {{ fmt(st.set, 1) }}</b><b v-else :class="st.v > 0 ? 'c-good' : 'c-strong'">{{ sgn(st.v) }}</b></td>
+                </tr>
+                <tr v-if="d.raw != null && d.raw !== d.s"><td>Dibatasi ke rentang 0–10 (hasil hitung {{ fmt(d.raw, 1) }})</td><td class="num"><b>= {{ fmt(d.s, 1) }}</b></td></tr>
+                <tr class="tot"><td>Nilai {{ d.k }} × bobot {{ Math.round(W[d.k] * 100) }}%</td><td class="num"><b>{{ fmt(d.s, 1) }} × {{ fmt(W[d.k], 2) }} = {{ fmt(d.s * W[d.k], 3) }}</b></td></tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </section>
@@ -240,7 +287,8 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
       </section>
     </div>
 
-    <section v-if="A.pv" class="rule-top">
+    <!-- Bila analisa rights issue memuat data pengendali dari dokumen, bagian ini tidak diulang. -->
+    <section v-if="A.pv && !ri?.doc?.pengendali" class="rule-top">
       <h2>Pengendali & rencananya</h2>
       <p v-if="A.pv.bukanPengambilAlih" class="warn">Nama di kolom pengendali adalah pengendali lama/penjual atau bukan pengambil alih.</p>
       <p><b>Siapa:</b> {{ A.pv.siapa }}</p>
@@ -253,10 +301,17 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
     <ControllerTrack v-if="ctrl" :c="ctrl" :self="ticker" :old-ctrl="!!store.pengendali[ticker]?.bukanPengambilAlih" />
     <NetworkMap v-if="extra.profil" :focus="ticker" />
 
-    <RightsIssue v-if="ri" :c="ri" />
+    <RightsIssue v-if="ri" :c="ri" :ticker="ticker" :name="A.p?.name || store.items.find(x => x.ticker === ticker)?.name || ''" />
+    <!-- Tanpa penambahan modal menurut dokumen, kewajaran transaksi aset tetap ditampilkan. -->
+    <section v-else-if="store.riDoc?.[ticker]" class="rule-top">
+      <h2>Transaksi aset menurut dokumen</h2>
+      <p class="small muted">{{ store.riDoc[ticker].status || 'Belum ada rencana penambahan modal' }}; simulasi rights issue tidak ditampilkan.</p>
+      <RiDokumen :doc="store.riDoc[ticker]" />
+    </section>
 
     <!-- Kalkulator dilusi. -->
-    <section v-if="calcMode" class="rule-top">
+    <!-- Kalkulator dilusi hanya tampil bila tidak ada analisa rights issue (simulasinya sudah ada di sana). -->
+    <section v-if="calcMode && !ri" class="rule-top">
       <h2>Kalkulator dilusi & nilai per saham</h2>
       <p v-if="calcMode === 'done'" class="small muted">Penerbitan saham baru sudah tereksekusi — jumlah saham dan porsi publik saat ini sudah mencerminkan dilusinya. Lihat <b>Hitungan dilusi</b> di pandangan analis untuk posisi sebelum dan sesudah.</p>
       <template v-else>
@@ -332,6 +387,8 @@ const hiSig = r => HI_SIGNAL.test(r.title) && !NOISE.test(r.title)
 </template>
 
 <style scoped>
+.docnew{border:1px solid var(--warn);border-left-width:4px;padding:8px 12px;margin:0 0 12px;display:flex;flex-direction:column;gap:2px}
+.docnew ul{margin:4px 0 0;padding-left:18px}
 .load{padding:18px 0}
 .err{display:flex;flex-direction:column;gap:4px;padding:14px 0;border-top:2px solid var(--strong)}
 .err strong{color:var(--strong)}
@@ -366,6 +423,17 @@ ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
 .track i{display:block;height:12px;margin-top:3px}
 .b-good{background:var(--good)} .b-warn{background:var(--warn)} .b-strong{background:var(--strong)}
 .ds{font-size:20px;font-weight:700;text-align:right;line-height:1.1}
+.scorebtn,.dimbtn{border:0;background:none;padding:0;font:inherit;color:inherit;cursor:pointer;text-align:left}
+.scorebtn:hover .score,.dimbtn:hover b{text-decoration:underline;text-underline-offset:4px}
+.clk{cursor:pointer}
+.calc{margin:8px 0 4px;max-width:640px}
+.calc .num,.steps .num{text-align:right;white-space:nowrap}
+.calc tfoot th{text-align:left}
+.steps{grid-column:1 / -1;margin:0 0 10px;padding:8px 12px;background:var(--sheet);border:1px solid var(--rule);max-width:720px}
+.steps table{width:100%;border-collapse:collapse}
+.steps td{padding:4px 0;border-bottom:1px solid var(--rule-2);vertical-align:top}
+.steps td.num{padding-left:16px}
+.steps tr.tot td{border-bottom:0;padding-top:6px}
 .why{grid-column:1 / -1;margin:4px 0 8px}
 
 .ladder{position:relative;height:78px;margin:6px 48px 10px}

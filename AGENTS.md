@@ -43,6 +43,7 @@ Satu PR untuk satu tujuan. Jelaskan di badan PR apa yang berubah dan bagaimana m
 | Jalankan CD sekarang | `systemctl --user start radar-deploy.service` |
 | Hentikan CD sementara | `systemctl --user stop radar-deploy.timer` (aktifkan lagi: `start`) |
 | Pasang ulang unit CD | `cp deploy/radar-deploy.{service,timer} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now radar-deploy.timer` |
+| Sinkron dengan laptop | status: `curl -s localhost:8765/api/status` → `sinkron`; panduan pasang di README (Tailscale, `--lan`, `.sinkron-kunci`) |
 
 Jangan mengedit file langsung di `~/radar-cangkang` di server. CD hanya bisa fast-forward, jadi perubahan lokal
 di sana menghentikan deploy. Semua perubahan lewat git.
@@ -54,6 +55,8 @@ di sana menghentikan deploy. Semua perubahan lewat git.
 - `website/.radar.sqlite*` (data tim) dan `website/.cache.sqlite*`.
 - Server sudah menolak menyajikan dotfile, `*.py`, `stockbit.config.json`, dan `tsa-*.json` (404). Jangan longgarkan
   aturan itu tanpa alasan kuat. Bila menambah berkas rahasia baru, tambahkan juga ke `.gitignore`.
+- `website/.sinkron-kunci` dan `.sinkron-peer` (sinkron antarserver) rahasia. Endpoint `/api/sinkron/*` hanya untuk
+  jaringan pribadi (Tailscale/LAN) berkunci dan selalu menolak permintaan lewat domain publik; jangan dibuka ke publik.
 - Token tradersaham memakai pola bearer seperti Stockbit (`website/.tsa-token` atau `website/.tsa-refresh`). Jangan
   menyimpan email/password di repo atau di server.
 

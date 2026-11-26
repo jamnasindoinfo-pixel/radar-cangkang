@@ -20,7 +20,9 @@ export const isBackdoorNews = (u, items = [], set = backdoorTickers(items)) => {
   const text = `${u.title} ${u.summary || ''}`
   if (!u.ticker) return BACKDOOR_TOPIC.test(text)
   if (!set.has(u.ticker)) return false
-  if (/^sb-report-/.test(u.id)) return true                 // Stockbit Reports selalu milik emiten itu
+  if (/^sb-report-/.test(u.id)) return true                // Stockbit Reports sudah ditandai Stockbit untuk emiten itu
+  // StockbitNews juga ditandai Stockbit, tetapi rangkuman pasar (IHSG, saham pilihan) hanya menyebut kode sambil lalu.
+  if (/^sb-news-/.test(u.id)) return !MARKET_WRAP.test(u.title) || BACKDOOR_TOPIC.test(text)
   if (!tickerInContext(u.ticker, text, items)) return false  // berita media: kode harus benar-benar merujuk ke emiten
   return !MARKET_WRAP.test(u.title) || BACKDOOR_TOPIC.test(text)
 }
@@ -33,6 +35,7 @@ export const NEWS_RULES = [
   [/transaksi material|perubahan kegiatan usaha|KBLI/i, 3, "Transaksi material/perubahan usaha: inti story backdoor — baca nilai transaksi, pihak lawan, dan apakah butuh RUPS independen."],
   [/tanpa (hak memesan|HMETD)|PMTHMETD|penempatan terbatas|private placement/i, 3, "Saham baru tanpa hak publik: cek harga pelaksanaan vs pasar dan siapa pembelinya — di bawah pasar ke afiliasi = transfer nilai dari publik."],
   [/HMETD|rights issue|PMHMETD/i, 3, "Rights issue: publik yang tidak menebus terdilusi; harga pelaksanaan jauh di bawah pasar menekan harga teoretis ex-rights."],
+  [/cessie|pengalihan (hak )?(tagih|piutang)|perubahan kreditur|kreditur baru/i, 3, "Pengalihan piutang (cessie): pihak baru membeli utang emiten — sering langkah awal pengambilalihan; kreditur baru bisa menukar piutang menjadi saham atau menjadi pengendali. Cek siapa pembelinya dan kaitannya dengan calon pengendali."],
   [/konversi utang|obligasi wajib konversi|\bOWK\b/i, 2, "Konversi menjadi saham: bandingkan harga konversi dengan harga pasar dan jumlah saham baru terhadap saham beredar."],
   [/transaksi afiliasi|benturan kepentingan/i, 2, "Transaksi afiliasi: uji kewajaran harga — nilai bisa berpindah ke pengendali tanpa persetujuan publik."],
   [/suspensi|penghentian sementara|disuspen/i, 2, "Suspensi: posisi tidak bisa dijual sampai dibuka — risiko likuiditas penuh; cek alasan dan jadwal pembukaan."],
@@ -51,7 +54,7 @@ export const NEWS_RULES = [
 ];
 export const NEWS_LEVEL = [["Noise", "bad"], ["Rutin", "calm"], ["Sinyal sedang", "warn"], ["Sinyal tinggi", "good"]];
 // Arah dampak tiap aturan NEWS_RULES (urutan sama): 1 positif bagi publik, -1 negatif/risiko, 0 perlu dicermati.
-const NEWS_TONE = [1, 0, 1, 1, -1, -1, -1, -1, -1, -1, -1, 1, 1, 0, 0, 0, 1, 0, 0, 0, -1]
+const NEWS_TONE = [1, 0, 1, 1, -1, -1, 0, -1, -1, -1, -1, -1, 1, 1, 0, 0, 0, 1, 0, 0, 0, -1]
 const KINERJA = NEWS_RULES.findIndex(r => /kinerja/.test(r[0].source))
 function toneOf(rule, text) {
   // Kinerja: arah dari isi berita (laba/naik vs rugi/turun).
@@ -100,5 +103,22 @@ export function newsTake(u, { items = [], pandangan = {} } = {}) {
     cls: /asimetri/i.test(pa.sikap) ? 'good' : /netral/i.test(pa.sikap) ? 'warn' : 'bad',
     ringkas: ringkas.slice(0, 140) + (ringkas.length > 140 ? '…' : ''),
   } : null
-  return { level, label: NEWS_LEVEL[level][0], cls: NEWS_LEVEL[level][1], points: pts.slice(0, 3), tones: t3, arah, nominalText, sikapLine, canAnalyze: !!d }
+  // Rincian untuk panel "penjelasan lengkap": semua poin yang cocok, alasan tingkat sinyal, hal yang perlu dipantau.
+  const all = [...(nominalText ? [{ text: nominalText, tone: tones[0] }] : []), ...hits.map(r => ({ text: r[2], tone: toneOf(r, text) }))]
+  const detail = { all: all.length ? all : [{ text: pts[0], tone: 0 }], levelWhy: LEVEL_WHY[level], watch: WATCH[u.type] || '', ringkas, sikap: pa?.sikap || '' }
+  return { level, label: NEWS_LEVEL[level][0], cls: NEWS_LEVEL[level][1], points: pts.slice(0, 3), tones: t3, arah, nominalText, sikapLine, canAnalyze: !!d, detail }
+}
+
+const LEVEL_WHY = [
+  'Tanggapan atas pergerakan harga atau permintaan bursa; bukan informasi nilai dan sering menjadi pertanda spekulasi.',
+  'Informasi administratif atau kinerja yang jarang menggerakkan harga saham backdoor.',
+  'Aksi korporasi atau pergerakan pemegang saham yang perlu dicermati, tetapi belum langsung mengubah nilai saham.',
+  'Menyangkut perubahan kendali, penawaran tender, injeksi aset, atau penerbitan saham baru yang langsung memengaruhi nilai saham.',
+]
+const WATCH = {
+  pengendali: 'Keterbukaan akuisisi final, harga per saham yang dibayar pengendali baru, dan pengumuman penawaran tender wajib.',
+  tender: 'Harga dan periode penawaran tender, serta porsi saham publik yang ikut dijual.',
+  rights: 'Pernyataan efektif OJK, harga pelaksanaan, tanggal cum-date, dan pihak pembeli siaga.',
+  rupslb: 'Hasil RUPSLB: persetujuan perubahan kegiatan usaha, pengurus, dan penambahan modal.',
+  uma: 'Jawaban emiten atas permintaan penjelasan bursa dan jadwal pembukaan suspensi.',
 }

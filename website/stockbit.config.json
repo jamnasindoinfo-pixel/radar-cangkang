@@ -19,7 +19,7 @@
     "source": "api",
     "url": "https://exodus.stockbit.com/stream/v3/symbol/{ticker}?category=STREAM_CATEGORY_REPORTS&report_type=REPORT_TYPE_ALL&last_stream_id=0&limit=30",
     "days": 365,
-    "skipTitle": "Laporan Bulanan Registrasi Pemegang Efek|Laporan Keuangan|Penyampaian Laporan Tahunan|Laporan Keberlanjutan|Rencana Penyelenggaraan Public Expose",
+    "skipTitle": "Laporan Bulanan Registrasi Pemegang Efek",
     "maxPages": 4
   },
   "backdoor": {

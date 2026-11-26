@@ -5,6 +5,7 @@ import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import { store, relasiOf, alsoIn } from '../store.js'
 import { api } from '../api.js'
+import { lensOf, lensesOf, transfersOf, layoutFor, mergeLayout } from '../lib/relasiAuto.js'
 
 const props = defineProps({
   ticker: { type: String, required: true },
@@ -19,17 +20,24 @@ const sizeOf = k => (k === 'main' ? { w: 280, h: 104 } : { w: 236, h: 80 })
 const flowId = 'alur-' + props.ticker
 const data = computed(() => relasiOf(props.ticker))
 const byId = computed(() => Object.fromEntries((data.value?.nodes || []).map(n => [n.id, n])))
+// Lensa: subset node/garis per sudut pandang, masing-masing dengan tata letak tersimpan sendiri.
+const lenses = computed(() => lensesOf(data.value))
+const lens = ref(lenses.value[0]?.[0] || 'semua')
+const view = computed(() => lensOf(data.value, lens.value))
+const saved = ref({})
+const xfers = computed(() => lens.value === 'arus' ? transfersOf(data.value, selId.value) : [])
+const nameOf = id => byId.value[id]?.t || id || 'tidak diungkap'
 
 // JSON & server menyimpan titik TENGAH; vue-flow memakai pojok kiri atas.
 function toNodes(saved = {}) {
-  return data.value.nodes.map(n => {
+  return view.value.nodes.map(n => {
     const { w, h } = sizeOf(n.k)
     const c = saved[n.id] || n
     return { id: n.id, type: 'card', position: { x: c.x - w / 2, y: c.y - h / 2 }, data: n }
   })
 }
 const nodes = ref([])
-const edges = computed(() => (data.value?.edges || []).map(([source, target, kind, label], i) =>
+const edges = computed(() => (view.value?.edges || []).map(([source, target, kind, label], i) =>
   ({ id: 'e' + i, source, target, type: 'rel', data: { kind, label } })))
 const ready = ref(false)
 const selId = ref(props.focus)
@@ -52,7 +60,7 @@ function clip(a, b) {
 // menimpa label lain maupun kotak. Dihitung ulang saat kotak digeser (getNodes reaktif).
 const labelPos = computed(() => {
   const nodes = getNodes.value
-  if (!nodes.length || !data.value?.edges) return {}
+  if (!nodes.length || !view.value?.edges) return {}
   const rect = {}
   for (const n of nodes) { const c = center(n); rect[n.id] = c }
   const cards = Object.values(rect).map(c => [c.x - c.w / 2 - 4, c.y - c.h / 2 - 4, c.x + c.w / 2 + 4, c.y + c.h / 2 + 4])
@@ -61,7 +69,7 @@ const labelPos = computed(() => {
   // Skor tumpang tindih: menimpa label lain jauh lebih buruk daripada menyentuh tepi kotak.
   const cost = b => labels.reduce((t, q) => t + area(b, q) * 20, 0) + cards.reduce((t, q) => t + area(b, q), 0)
   const out = {}
-  data.value.edges.forEach(([src, tgt, , label], i) => {
+  view.value.edges.forEach(([src, tgt, , label], i) => {
     const a = rect[src], b = rect[tgt]
     if (!a || !b) return
     const s = clip(a, b), e = clip(b, a)
@@ -113,20 +121,31 @@ const sel = computed(() => {
 let saveTimer = 0
 function onDragStop() {
   clearTimeout(saveTimer)
+  const l = lens.value, cur = nodes.value  // dikunci sekarang: lensa bisa diganti sebelum timer jalan
   saveTimer = setTimeout(() => {
-    const body = Object.fromEntries(nodes.value.map(n => {
+    const body = Object.fromEntries(cur.map(n => {
       const c = center({ data: n.data, computedPosition: n.position })
       return [n.id, { x: Math.round(c.x), y: Math.round(c.y) }]
     }))
-    if (!store.status?.readOnly) api.put('/api/layout/' + props.ticker, body).catch(e => console.warn('Gagal menyimpan tata letak', e))
+    saved.value = mergeLayout(saved.value, l, body)
+    if (!store.status?.readOnly) api.put('/api/layout/' + props.ticker, saved.value).catch(e => console.warn('Gagal menyimpan tata letak', e))
   }, 400)
 }
 async function resetLayout() {
   clearTimeout(saveTimer)
   nodes.value = toNodes()
-  if (!store.status?.readOnly) api.put('/api/layout/' + props.ticker, {}).catch(e => console.warn('Gagal menghapus tata letak', e))
+  saved.value = mergeLayout(saved.value, lens.value, {})
+  if (!store.status?.readOnly) api.put('/api/layout/' + props.ticker, saved.value).catch(e => console.warn('Gagal menghapus tata letak', e))
   await nextTick()
   requestAnimationFrame(fit)
+}
+
+function setLens(k) {
+  lens.value = k
+  nodes.value = toNodes(layoutFor(saved.value, k))
+  // Tabel arus saham mengubah tinggi kanvas; tunggu ResizeObserver vue-flow sebelum fit.
+  clearTimeout(fitTimer)
+  fitTimer = setTimeout(fit, 150)
 }
 
 let fitTimer = 0
@@ -143,9 +162,8 @@ onMounted(async () => {
   opener = document.activeElement
   dlg.value?.focus()
   if (!data.value) return
-  let saved = {}
-  try { saved = (await api.get('/api/layout/' + props.ticker)) || {} } catch (e) { console.warn('Gagal memuat tata letak', e) }
-  nodes.value = toNodes(saved)
+  try { saved.value = (await api.get('/api/layout/' + props.ticker)) || {} } catch (e) { console.warn('Gagal memuat tata letak', e) }
+  nodes.value = toNodes(layoutFor(saved.value, lens.value))
   ready.value = true
   // Muat langsung (bukan dari navigasi): ukuran kanvas kadang belum final saat nodes-initialized.
   fitTimer = setTimeout(fit, 350)
@@ -162,6 +180,10 @@ onBeforeUnmount(() => {
     <div ref="dlg" class="flow-dlg" role="dialog" aria-modal="true" aria-labelledby="flowT" tabindex="-1" @keydown="onKey">
       <header class="flow-bar">
         <h2 id="flowT" class="cond">{{ ticker }} · alur saham</h2>
+        <div v-if="lenses.length" class="lens" role="group" aria-label="Lensa">
+          <button v-for="[k, t] in [...lenses, ['semua', 'Semua']]" :key="k" type="button"
+            :class="['btn', { on: lens === k }]" :aria-pressed="lens === k" @click="setLens(k)">{{ t }}</button>
+        </div>
         <div class="legend">
           <span v-for="[k, t] in KINDS" :key="k"><i :class="'ln k-' + k" /> {{ t }}</span>
         </div>
@@ -180,6 +202,7 @@ onBeforeUnmount(() => {
       <p v-if="!data" class="empty">Belum ada data relasi untuk {{ ticker }}. Tambahkan di website/relasi-verified.json.</p>
 
       <div v-else class="flow-body">
+        <div class="stage">
         <div class="canvas">
           <VueFlow v-if="ready" :id="flowId" v-model:nodes="nodes" :edges="edges"
             :min-zoom="0.3" :max-zoom="2.5" :node-drag-threshold="4"
@@ -204,6 +227,22 @@ onBeforeUnmount(() => {
             </template>
           </VueFlow>
           <div class="hint">Klik kotak untuk detail · seret kotak untuk memindah · seret latar untuk menggeser · scroll untuk zoom · Esc untuk menutup</div>
+        </div>
+        <section v-if="lens === 'arus' && data.transfers?.length" class="xfer" aria-labelledby="xferT">
+          <h4 id="xferT" class="lbl">Arus saham{{ selId ? ' · ' + nameOf(selId) : '' }} <span class="muted">({{ xfers.length }} transaksi)</span></h4>
+          <table>
+            <thead><tr><th>Tanggal</th><th>Dari → ke</th><th class="num">Saham</th><th class="num">Harga</th><th class="num">Nilai</th><th>Keterangan</th></tr></thead>
+            <tbody>
+              <tr v-for="(t, i) in xfers" :key="i">
+                <td class="cond">{{ t.tgl }}</td>
+                <td>{{ nameOf(t.dari) }} → {{ nameOf(t.ke) }}</td>
+                <td class="num">{{ t.saham }}</td><td class="num">{{ t.harga }}</td><td class="num">{{ t.nilai }}</td>
+                <td class="muted">{{ t.ket }}<span v-if="t.src" class="src"> · {{ t.src }}</span></td>
+              </tr>
+            </tbody>
+          </table>
+          <p v-if="!xfers.length" class="muted">Tidak ada transaksi untuk pihak ini.</p>
+        </section>
         </div>
 
         <aside v-if="sel" class="drawer" aria-labelledby="selT">
@@ -272,8 +311,23 @@ onBeforeUnmount(() => {
 .ln.k-void{border-top:2px dashed var(--strong)}
 
 .flow-body{flex:1;min-height:0;display:flex}
-.canvas{position:relative;flex:1;min-width:0;background-image:radial-gradient(var(--rule) 1px,transparent 1px);background-size:24px 24px}
+.stage{flex:1;min-width:0;display:flex;flex-direction:column}
+.canvas{position:relative;flex:1;min-width:0;min-height:0;background-image:radial-gradient(var(--rule) 1px,transparent 1px);background-size:24px 24px}
 .hint{position:absolute;left:12px;bottom:10px;font-size:12px;color:var(--ink-2);background:color-mix(in oklab,var(--paper) 90%,transparent);padding:4px 8px;border-radius:3px;pointer-events:none}
+
+/* lensa */
+.lens{display:flex;gap:4px;flex-wrap:wrap}
+.lens .btn{font-size:13px;padding:4px 10px}
+.lens .btn.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+
+/* tabel arus saham */
+.xfer{flex:0 0 auto;max-height:40%;overflow:auto;background:var(--sheet);border-top:1px solid var(--rule);padding:10px 16px}
+.xfer h4{margin:0 0 6px}
+.xfer table{width:100%;border-collapse:collapse;font-size:13px}
+.xfer th{text-align:left;font-weight:700;color:var(--ink-2);border-bottom:1px solid var(--rule);padding:4px 8px;position:sticky;top:-10px;background:var(--sheet)}
+.xfer td{border-top:1px solid var(--rule-2);padding:5px 8px;vertical-align:top}
+.xfer .num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.xfer .src{font-size:12px}
 
 /* kartu node */
 .card{box-sizing:border-box;padding:10px 12px;display:flex;flex-direction:column;justify-content:center;gap:2px;background:var(--sheet);color:var(--ink);border:1px solid var(--rule);border-radius:3px;cursor:pointer;text-align:left;outline-offset:2px}

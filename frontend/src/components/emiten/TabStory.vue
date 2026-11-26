@@ -4,7 +4,7 @@ import { store, storyOf, itemOf } from '../../store.js'
 import { STAGES, big, fmt, fmtDate, num, progressOf, stageOf, x2 } from '../../lib/domain.js'
 import { storyValuation } from '../../lib/emitenExtra.js'
 import ControllerDialog from './ControllerDialog.vue'
-import InjeksiDialog from './InjeksiDialog.vue'
+import { useRoute, useRouter } from 'vue-router'
 
 const props = defineProps({ ticker: { type: String, required: true } })
 const emit = defineEmits(['flow'])
@@ -28,7 +28,7 @@ const injText = computed(() => {
 const nominal = computed(() => v.value?.nominal || story.value?.nominal || '')
 const it = computed(() => itemOf(props.ticker))
 const ctrl = computed(() => it.value?.ctrlName || it.value?.acquirer || '')
-const ctrlPct = computed(() => num(it.value?.ctrlPct))
+const ctrlPct = computed(() => num(pg.value?.ctrlPct ?? it.value?.ctrlPct))
 const oldPct = computed(() => story.value?.oldPct ? Math.min(100, story.value.oldPct) : null)
 const prog = computed(() => it.value ? progressOf(it.value, { aset: store.aset, verified: store.verified }) : null)
 const stageName = computed(() => it.value ? (STAGES.find(x => x.id === stageOf(it.value)) || STAGES[0]).name : '')
@@ -46,7 +46,29 @@ const sources = computed(() => {
   return [...new Set(out)]
 })
 
+// Isian otomatis bila belum ada data kurasi: dari keterbukaan BEI / berita emiten (store.updates), terbaru dulu.
+const reps = computed(() => store.updates.filter(u => u.ticker === props.ticker).sort((a, b) => (b.date || '').localeCompare(a.date || '')))
+const RUTIN = /bukti iklan|laporan bulanan|corporate secretary|sekretaris perusahaan|penjelasan atas permintaan penjelasan|volatilitas|registrasi pemegang efek/i
+const RENCANA = /rencana|akan|tender|penawaran|hmetd|rights issue|pmthmetd|penambahan modal|rupslb|luar biasa|pengambilalihan|negosiasi|ppjb|cspa|cessie|kreditur|pengendali|perubahan (kegiatan|nama)/i
+const kalimat = u => (u.summary || '').split(/(?<=[.!?])\s+/).find(x => x.length > 30) || u.title
+const rencanaAuto = computed(() => {
+  const u = reps.value.find(x => !RUTIN.test(x.title || '') && RENCANA.test(`${x.title} ${x.summary || ''}`))
+  return u ? { teks: kalimat(u), u } : null
+})
+// Pengendali saat ini dari profil emiten (tebakan pemegang terbesar) belum tentu pengendali BARU.
+// Dianggap pengendali BARU bila ada pengakuisisi, tahap sudah lewat penyaringan, atau pengambilalihan tercatat <= 1 tahun.
+const baruTercatat = computed(() => {
+  const d = story.value?.takeoverDate
+  return !!it.value?.acquirer || (it.value && stageOf(it.value) !== 'radar') || (!!d && Date.now() - new Date(d) <= 365 * 864e5)
+})
+const ctrlBaru = computed(() => baruTercatat.value ? ctrl.value : '')
+const ctrlKini = computed(() => !ctrlBaru.value && ctrl.value ? ctrl.value : '')
+const sumberAuto = computed(() => reps.value.filter(x => !RUTIN.test(x.title || '')).slice(0, 4))
+
 const dlg = ref('')
+const route = useRoute(), router = useRouter()
+// Analisa aset lengkap (riset, KJPP, mekanisme) ada di tab Aset.
+const keAset = () => router.replace({ query: { ...route.query, tab: 'aset' } })
 function toFlow(node) { dlg.value = ''; emit('flow', node) }
 </script>
 
@@ -54,14 +76,14 @@ function toFlow(node) { dlg.value = ''; emit('flow', node) }
   <div class="st">
     <button type="button" class="card rule-top click" aria-haspopup="dialog" @click="dlg = 'ctrl'">
       <h2 class="lbl">Siapa pengendali baru<template v-if="story?.takeoverDate"> · sejak {{ fmtDate(story.takeoverDate) }}</template></h2>
-      <p>{{ pg?.siapa || ctrl || 'belum ada' }}</p>
-      <div v-if="ctrlPct != null" class="own"><b class="num">{{ fmt(ctrlPct, 2) }}%</b><span class="hbar" aria-hidden="true"><i :style="{ width: Math.min(100, ctrlPct) + '%' }"></i></span></div>
+      <p>{{ pg?.siapa || ctrlBaru || 'belum ada' }}<span v-if="!pg?.siapa && ctrlKini" class="small muted"> · pengendali saat ini: {{ ctrlKini }}</span></p>
+      <div v-if="ctrlPct != null && (pg?.siapa || ctrlBaru)" class="own"><b class="num">{{ fmt(ctrlPct, 2) }}%</b><span class="hbar" aria-hidden="true"><i :style="{ width: Math.min(100, ctrlPct) + '%' }"></i></span></div>
       <span class="go">Lihat profil lengkap</span>
     </button>
 
     <section class="card rule-top">
       <h2 class="lbl">Pengendali lama<span v-if="story?.oldEdited" class="tag t-calm">diubah</span></h2>
-      <p>{{ story?.oldName || (story?.loaded ? 'belum ada' : 'memuat') }}
+      <p>{{ story?.oldName || (story?.loaded ? (story?.takeoverDate ? 'belum tercatat di KSEI' : 'belum ada') : 'memuat') }}
         <span v-if="story?.oldInferred" class="tag t-warn" title="Penjual tidak tercatat; ini pemegang saham 20% ke atas terakhir sebelum pengambilalihan">perkiraan</span></p>
       <div v-if="oldPct" class="own"><b class="num">{{ fmt(oldPct, 2) }}%</b><span class="hbar old" aria-hidden="true"><i :style="{ width: oldPct + '%' }"></i></span></div>
     </section>
@@ -87,7 +109,7 @@ function toFlow(node) { dlg.value = ''; emit('flow', node) }
     </section>
 
     <component :is="inj ? 'button' : 'section'" :type="inj ? 'button' : undefined" class="card rule-top" :class="{ click: inj }"
-      :aria-haspopup="inj ? 'dialog' : undefined" @click="inj && (dlg = 'inj')">
+      :title="inj ? 'Buka tab Aset' : undefined" @click="inj && keAset()">
       <h2 class="lbl">Injeksi<span v-if="injTag" class="tag t-calm" :title="injTag.title">{{ injTag.t }}</span></h2>
       <p>{{ injText || 'belum ada' }}<template v-if="nominal"> · {{ nominal }}</template></p>
       <p v-if="sval" class="val">
@@ -100,12 +122,15 @@ function toFlow(node) { dlg.value = ''; emit('flow', node) }
 
     <section class="card rule-top">
       <h2 class="lbl">Rencana</h2>
-      <p>{{ pg?.rencana || 'belum ada' }}</p>
+      <p v-if="pg?.rencana">{{ pg.rencana }}</p>
+      <p v-else-if="rencanaAuto">{{ rencanaAuto.teks }}
+        <a class="tag t-calm" :href="rencanaAuto.u.url" :title="rencanaAuto.u.title" target="_blank" rel="noopener">sumber {{ fmtDate(rencanaAuto.u.date) }}</a></p>
+      <p v-else>belum ada</p>
     </section>
 
     <section class="card rule-top judge">
       <h2 class="lbl">Catatan</h2>
-      <p>{{ pg?.catatan || 'belum ada' }}</p>
+      <p>{{ pg?.catatan || it?.notes || 'belum ada' }}</p>
     </section>
 
     <section class="card rule-top">
@@ -118,11 +143,13 @@ function toFlow(node) { dlg.value = ''; emit('flow', node) }
       <p v-if="story?.verified" class="vnote small"><b>Dicek dengan Stockbit Reports<template v-if="story.vSrc"> · {{ fmtDate(story.vSrc.date) }}</template></b>
         <span v-if="story.vNote" class="muted">{{ story.vNote }}</span></p>
       <ul v-if="sources.length" class="small"><li v-for="s in sources" :key="s">{{ s }}</li></ul>
+      <ul v-else-if="sumberAuto.length" class="small">
+        <li v-for="u in sumberAuto" :key="u.url"><a :href="u.url" target="_blank" rel="noopener">{{ u.title }}</a> <span class="muted">· {{ u.source || 'Stockbit' }} · {{ fmtDate(u.date) }}</span></li>
+      </ul>
       <p v-else class="muted">belum ada</p>
     </section>
 
     <ControllerDialog v-if="dlg === 'ctrl'" :ticker="ticker" @close="dlg = ''" @flow="toFlow" />
-    <InjeksiDialog v-if="dlg === 'inj'" :ticker="ticker" @close="dlg = ''" />
   </div>
 </template>
 

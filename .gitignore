@@ -34,3 +34,63 @@ website/tsa-*.json
 .ci/
 # Semua berkas rahasia tradersaham, termasuk cadangan (.tsa-creds.json.backup-*)
 **/.tsa-*
+
+# stempel sinkron Stockbit (runtime)
+**/.sync-state.json
+
+# suara video (kunci Azure & cache audio)
+**/.azure-speech
+**/.tts-cache/
+**/.seasonality.json
+**/.seasonality.tmp
+**/.broker-pola.json
+**/.broker-pola.tmp
+**/.broker-harian.json
+**/.broker-harian.tmp
+**/.ihsg.json
+**/.ihsg.tmp
+**/.recovery.json
+**/.recovery.tmp
+
+# riwayat ramalan Time Series & Astronacci (runtime)
+**/.ramalan-log.json
+
+# laporan keuangan seluruh BEI dari akun StockbitReports (runtime)
+**/.lk-laporan.json
+# hasil POV terakhir (runtime)
+**/.pov.json
+**/.pov.tmp
+# analisa mendalam POV (runtime)
+**/.pov-dalam.json
+**/.pov-dalam.tmp
+**/.pov-dalam/
+**/.pov-dalam-pemicu.json
+**/.pov-dalam-pemicu.tmp
+# pemindai calon cangkang (runtime)
+**/.pindai.json
+**/.pindai.tmp
+# screening Harmonic Pattern POV (runtime)
+**/.harmonik.json
+**/.harmonik.tmp
+# riwayat skor Saham 50 (runtime)
+**/.saham50-riwayat.json
+**/.saham50-riwayat.tmp
+# klasifikasi sektor emiten (runtime)
+**/.sektor.json
+**/.sektor.tmp
+**/.lk-kuartal.json
+**/.lk-keystats.json
+**/.saham50.json
+**/.bei-kode.json
+
+# sinkron antarserver lewat Tailscale (rahasia: alamat peer dan kunci bersama)
+**/.sinkron-peer
+**/.sinkron-kunci
+**/*.sinkron-tmp
+**/.laptop-sinkron.log
+**/.server.log
+**/.server-err.log
+**/.rekomendasi.json
+**/.rekomendasi.tmp
+**/.audit-monitor.json
+**/.audit-monitor.tmp

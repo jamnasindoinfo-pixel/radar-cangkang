@@ -49,12 +49,14 @@ def jwt_exp(token: str | None) -> int:
 
 
 def write_secret(path: Path, value: str) -> None:
-    # Tulis atomik dengan izin 600 supaya token tidak pernah setengah tertulis.
-    tmp = path.with_suffix(".tmp")
+    # Tulis atomik dengan izin 600 supaya token tidak pernah setengah tertulis. Bila path symlink (.stockbit-token di
+    # jni-server), yang diganti berkas tujuannya supaya symlink tetap utuh (sama dengan token_tulis di server.py).
+    target = path.resolve() if path.is_symlink() else path
+    tmp = target.with_name(target.name + ".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(value + "\n")
-    os.replace(tmp, path)
+    os.replace(tmp, target)
 
 
 def find_tokens(obj, path=""):

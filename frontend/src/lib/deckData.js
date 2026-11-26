@@ -7,6 +7,11 @@ import { progressOf, posisiOf, dealOf, MILESTONES } from './domain.js'
 import { indicators, taSignals, buildPlan, taVerdict } from './ta.js'
 import { analyzePatterns, bestBullPattern, polaPlan, levels, structure } from './patterns.js'
 import { sectorOf } from './deckThemes.js'
+import { riCase, riCalc, riRange, riFunding } from './rightsIssue.js'
+import { recommend } from './recommend.js'
+import { laporanBaru } from './pembaruan.js'
+import { newsTake } from './news.js'
+import { newsConclusion } from './newsConclusion.js'
 
 const safe = p => p.catch(() => null)
 
@@ -59,17 +64,20 @@ export async function collectDeck(t, { store, api, storyOf, getBenchmark, onStep
     mech = mechOf(aset, A.sv)
     steps = injSteps(mech, { sv: A.sv, ms: prog?.ms || {} })
     const peers = (aset?.pembanding || []).filter(x => /^[A-Z]{4}$/.test(x)).slice(0, 5)
+    // Simulasi otomatis: kelipatan pembanding Stockbit (bila ada) + acuan cadangan tambang dari simDefaults.
+    let m = { n: 0 }, peersOk = []
     if (peers.length) {
       onStep('Membandingkan dengan emiten sejenis')
       const ps = await Promise.all(peers.map(p => safe(api.get('/api/profile', { ticker: p }))))
-      const m = peerMultiples(ps)
-      sim = { ...simKjpp({ ...simDefaults(aset, A.sv), per: m.per, ps: m.ps, pbv: m.pbv }), peers, n: m.n }
+      m = peerMultiples(ps)
+      peersOk = peers.filter((_, i) => ps[i])
     }
+    sim = { ...simKjpp({ ...simDefaults(aset, A.sv), per: m.per, ps: m.ps, pbv: m.pbv }), peers, peersOk, n: m.n }
   }
 
   const sector = sectorOf({ baru: story?.baru || verified[t]?.baru, aset: [aset?.aset?.sektor, aset?.aset?.nama].filter(Boolean).join(' '),
     sektor: profile?.sector, industri: profile?.industry, nama: item?.name || profile?.name })
-  return {
+  const out = {
     t, name: item?.name || profile?.name || A.p?.name || '', sector, date: new Date().toISOString().slice(0, 10),
     A, item, profile, reports, aset, profil, pv: store.pengendali?.[t] || null, pa: A.pa,
     pc: analysisProsCons(A, extra), deep: deepView(A, extra), cyc: cycleOf(A, extra),
@@ -77,4 +85,24 @@ export async function collectDeck(t, { store, api, storyOf, getBenchmark, onStep
     story, tech, sim, mech, mechLabel: mech ? MECH_LABEL[mech] : '', steps, kjpp: kjppStatus(aset?.kjpp), tx: txValue(aset, A.sv),
     milestones: MILESTONES,
   }
+  // Rights issue (bila ada rencana penambahan modal) pada harga awal analisa, lalu rekomendasi tindakan.
+  out.ri = riCase(A, { aset, sv: verified[t], item, pv: store.pengendali?.[t], doc: store.riDoc?.[t],
+    reports: [...(A.reps || []), ...(store.updates || []).filter(u => u.ticker === t)] })
+  if (out.ri) {
+    out.riP = riRange(out.ri).start
+    out.riR = riCalc(out.ri, out.riP, 0)
+    out.riF = riFunding(out.ri, out.riR)
+  }
+  out.riDoc = store.riDoc?.[t] || null
+  out.rec = recommend(out)
+  out.riset = store.riset?.[t] || null   // riset aset lintas sumber (aset-riset.json) untuk infografis
+  // Laporan material yang lebih baru dari analisa/riset kurasi (ditampilkan di slide ringkasan).
+  out.lapBaru = laporanBaru(store.updates || [], t, { pandangan: store.pandangan || {}, riset: store.riset || {} })
+  // Berita terkini (Stockbit Reports + media, diperbarui server tiap 2 jam) dan kesimpulannya.
+  const news = (store.updates || []).filter(u => u.ticker === t && u.title)
+    .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')))
+  out.newsSum = newsConclusion(news, { ticker: t })
+  out.newsRecent = news.filter(u => u.type && u.type !== 'lainnya' || /penjelasan|suspensi|gembok|hentikan/i.test(u.title)).slice(0, 5)
+    .map(u => ({ u, take: newsTake(u, { items: store.items || [], pandangan: store.pandangan || {} }) }))
+  return out
 }

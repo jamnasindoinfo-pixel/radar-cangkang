@@ -1,15 +1,21 @@
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { api } from '../../api.js'
 import { store, itemOf } from '../../store.js'
 import { big, fmt, fmtDate, num, pctTxt, progressOf, rp, x2 } from '../../lib/domain.js'
 import { MECH_LABEL, dilusi, flowOf, injSteps, kjppStatus, mechOf, peerMultiples, reservesOf, simDefaults, simKjpp, toM, txValue } from '../../lib/emitenExtra.js'
 import { KURS } from '../../lib/analysis.js'
-import Modal from './Modal.vue'
+import { faktaAset, laporanMaterial } from '../../lib/pembaruan.js'
 
-// Aset yang diinjeksi: aset-verified.json (27 emiten) + relasi-verified.json → <T>.injeksi bila ada (NAYZ, lebih rinci).
+// Tab Aset: seluruh analisa aset yang akan/sudah diinjeksi. Sumber: riset aset (aset-riset.json: jurnal, media, situs
+// perusahaan, regulator, aset lain milik pengendali), aset-verified.json (transaksi, KJPP, mekanisme), dan
+// relasi-verified.json → <T>.injeksi bila ada. Simulasi nilai KJPP dihitung otomatis tanpa isian manual.
 const props = defineProps({ ticker: { type: String, required: true } })
-const emit = defineEmits(['close'])
+const rs = computed(() => store.riset?.[props.ticker] || null)
+const src = i => rs.value?.sumber?.[i]
+const JENIS = { jurnal: 'jurnal', media: 'media', dokumen: 'dokumen', 'situs perusahaan': 'perusahaan', regulator: 'regulator' }
+const TB_R = [['komoditas', 'Komoditas'], ['lokasi', 'Lokasi'], ['izin', 'Izin'], ['luas', 'Luas'], ['cadangan', 'Cadangan'], ['sumberDaya', 'Sumber daya'],
+  ['standar', 'Standar pelaporan'], ['kualitas', 'Kualitas'], ['produksi', 'Produksi'], ['umur', 'Umur tambang'], ['stripRatio', 'Stripping ratio'], ['infrastruktur', 'Infrastruktur']]
 
 const a = computed(() => store.aset[props.ticker] || null)
 const r = computed(() => store.relasi[props.ticker]?.injeksi || null)
@@ -48,7 +54,8 @@ const flow = computed(() => (a.value || sv.value?.injectType) ? flowOf({
 const steps = computed(() => injSteps(mech.value, { sv: sv.value, ms: progressOf(item.value || { ticker: props.ticker }, { aset: store.aset, verified: store.verified }).ms }))
 const flowLabel = computed(() => flow.value ? [...flow.value.boxes.map(b => `${b.t1} (${b.t2})`), ...flow.value.arrows.map(x => x.lines.join(' '))].join('; ') : '')
 
-// Simulasi nilai KJPP: isian Rp miliar; kelipatan pembanding dari Stockbit.
+// Simulasi nilai KJPP otomatis (tanpa isian manual): data aset (aset-verified), kelipatan median pembanding Stockbit,
+// dan acuan USD/ton cadangan untuk tambang. Satuan Rp miliar.
 const si = reactive({ tx: null, porsi: 100, laba: null, pend: null, eq: null, res: null, usdTon: null, per: null, ps: null, pbv: null })
 const sd = computed(() => simDefaults(a.value, sv.value))
 Object.assign(si, Object.fromEntries(Object.entries(sd.value).filter(([key]) => key in si)))
@@ -65,17 +72,23 @@ const SIM_IN = computed(() => [
   ['laba', 'Laba bersih aset 100% (Rp miliar/tahun)', perHint.value],
   ['pend', 'Pendapatan aset 100% (Rp miliar/tahun)', perHint.value],
   ['eq', 'Ekuitas aset 100% (Rp miliar)', 'nilai buku'],
-  ...(mining.value ? [['res', 'Cadangan aset 100% (juta ton)', res.value ? [res.value.kind, String(ast.value.tambang?.kalori || '').slice(0, 40)].filter(Boolean).join(' · ') : 'isi bila diketahui'],
-    ['usdTon', 'Nilai per ton cadangan (USD/ton)', 'asumsi Anda; kosongkan bila tidak yakin']] : []),
+  ...(mining.value ? [['res', 'Cadangan aset 100% (juta ton)', res.value ? [res.value.kind, String(ast.value.tambang?.kalori || '').slice(0, 40)].filter(Boolean).join(' · ') : 'belum diungkap'],
+    ['usdTon', 'Nilai per ton cadangan (USD/ton)', sd.value.usdTonNote || 'tidak ada acuan untuk komoditas ini']] : []),
   ['per', 'PER pembanding (×)', peerNote.value],
   ['ps', 'P/S pembanding (×)', peerNote.value],
   ['pbv', 'PBV pembanding (×)', peerNote.value],
 ])
-const perHint = computed(() => fin.value.periode ? `${fin.value.periode}${sd.value.af !== 1 ? ` · disetahunkan ×${fmt(sd.value.af, 2)}` : ''}` : 'isi bila diketahui')
+const perHint = computed(() => fin.value.periode ? `${fin.value.periode}${sd.value.af !== 1 ? ` · disetahunkan ×${fmt(sd.value.af, 2)}` : ''}` : 'belum diungkap')
+// Tampilan nilai yang dipakai (hanya baca).
+const showVal = (key, v) => v == null || v === '' ? 'belum ada' : key === 'porsi' ? fmt(v, 1) + '%' : ['per', 'ps', 'pbv'].includes(key) ? fmt(v, 2) + '×'
+  : key === 'res' ? fmt(v, 1) + ' juta ton' : key === 'usdTon' ? 'USD' + fmt(v, 2) : 'Rp' + fmt(v, 1) + ' M'
 
-// Dampak ke saham emiten: saham baru, porsi publik, nilai buku per saham.
-const dl = reactive({ V: toM(kc.value.nilaiDibayarSaham ?? val.value) ?? 0, C: toM(kc.value.kasSegar) ?? 0,
-  P: kc.value.hargaPelaksanaan || item.value?.tender?.price || num(item.value?.price) || 0, T: 0 })
+// Dampak ke saham emiten (otomatis): nilai dibayar dengan saham = nilai transaksi (atau nilai tengah simulasi bila
+// transaksi belum diumumkan), kas dari kalkulator analis, harga pelaksanaan = harga analis/PTW/harga pasar, publik tidak menebus.
+const dl = computed(() => ({ V: toM(kc.value.nilaiDibayarSaham ?? val.value ?? sim.value.mid) ?? 0, C: toM(kc.value.kasSegar) ?? 0,
+  P: kc.value.hargaPelaksanaan || item.value?.tender?.price || num(item.value?.price) || 0, T: 0 }))
+const dlSrc = computed(() => ({ V: kc.value.nilaiDibayarSaham != null ? 'kalkulator analis' : val.value ? 'nilai transaksi diumumkan' : sim.value.mid != null ? 'nilai tengah simulasi' : 'belum ada',
+  C: kc.value.kasSegar != null ? 'kalkulator analis' : 'tidak ada setoran tunai', P: kc.value.hargaPelaksanaan ? 'kalkulator analis' : item.value?.tender?.price ? 'harga PTW' : 'harga pasar terakhir', T: 'skenario terburuk bagi publik' }))
 const base = computed(() => {
   // Stockbit dulu, lalu data radar, lalu angka di pandangan analis.
   const st = prof.value?.stats || {}, pd = pa.value?.dilusi || {}, price = num(item.value?.price) ?? pa.value?.hargaAcuan ?? null
@@ -83,19 +96,18 @@ const base = computed(() => {
   return { S0, E0: prof.value?.metrics?.equity ?? 0, f: (st.freeFloat ?? num(item.value?.float) ?? pd.porsiPublikSekarang ?? 0) / 100, price }
 })
 const out = computed(() => {
-  const b = base.value, V = (+dl.V || 0) * 1e9, C = (+dl.C || 0) * 1e9
-  const d = dilusi({ S0: b.S0, E0: b.E0, f: b.f, V, C, P: +dl.P, tk: (+dl.T || 0) / 100, h: 1 })
+  const b = base.value, V = (+dl.value.V || 0) * 1e9, C = (+dl.value.C || 0) * 1e9
+  const d = dilusi({ S0: b.S0, E0: b.E0, f: b.f, V, C, P: +dl.value.P, tk: (+dl.value.T || 0) / 100, h: 1 })
   if (!d) return null
   // Nilai buku per saham bila aset bernilai sebesar nilai tengah simulasi (bukan nilai transaksi).
   const vpsSim = sim.value.mid != null ? ((b.E0 || 0) + sim.value.mid + C) / d.S1 : null
   return { ...d, vpsSim }
 })
-const DL_IN = [['V', 'Nilai dibayar dengan saham baru (Rp miliar)', 'inbreng / konversi utang'], ['C', 'Kas segar masuk (Rp miliar)', 'setoran tunai HMETD'],
-  ['P', 'Harga pelaksanaan (Rp)', 'harga saham baru'], ['T', 'Publik menebus (%)', '0 = publik tidak ikut']]
-const useMid = () => { if (sim.value.mid != null) dl.V = toM(sim.value.mid) }
+const DL_IN = [['V', 'Nilai dibayar dengan saham baru'], ['C', 'Kas segar masuk'], ['P', 'Harga pelaksanaan'], ['T', 'Publik menebus']]
+const dlShow = (key, v) => key === 'P' ? rp(v) : key === 'T' ? fmt(v) + '%' : 'Rp' + fmt(v, 1) + ' M'
 
 onMounted(async () => {
-  peerNote.value = peers.value.length ? 'memuat pembanding…' : 'isi manual'
+  peerNote.value = peers.value.length ? 'memuat pembanding…' : 'pembanding belum ditentukan'
   const [own, ...ps] = await Promise.all([props.ticker, ...peers.value].map(t => api.get('/api/profile', { ticker: t }).catch(() => null)))
   prof.value = own
   if (!peers.value.length) return
@@ -104,20 +116,122 @@ onMounted(async () => {
   for (const key of ['per', 'ps', 'pbv']) if (m[key] != null && si[key] == null) si[key] = Math.round(m[key] * 100) / 100
   peerNote.value = m.n ? `median ${m.n} pembanding Stockbit` : 'data pembanding kosong'
 })
-const fid = key => `sim-${props.ticker}-${key}`
-const sources = computed(() => [...(a.value?.sumber || []).map(t => ({ t })), ...(r.value?.sumber || [])])
+// Fakta aset dari laporan terakhir (semua emiten): poin kunci laporan Stockbit yang disinkronkan server tiap 2 jam
+// (store.updates); bila belum ada di store, diambil langsung dari Stockbit. Lihat lib/pembaruan.js.
+const fakta = ref([])
+watch(() => [props.ticker, store.updates.length], async ([t]) => {
+  const asOf = rs.value?.asOf || ''
+  let reps = laporanMaterial(store.updates, t)
+  if (!reps.length) {
+    try { reps = (await api.get('/api/reports', { ticker: t })).items || [] } catch { reps = [] }
+  }
+  fakta.value = faktaAset(reps, { asOf })
+}, { immediate: true })
+
+// Unduh riset aset (PDF, format riset IHSG): fakta laporan diambil segar dari Stockbit saat tombol ditekan.
+const busyPdf = ref(false), errPdf = ref('')
+async function unduhPdf() {
+  busyPdf.value = true; errPdf.value = ''
+  try {
+    const [{ jsPDF }, { asetPdf, asetPdfName }] = await Promise.all([import('jspdf'), import('../../lib/asetPdf.js')])
+    let fk = fakta.value
+    try { const r = await api.get('/api/reports', { ticker: props.ticker, fresh: 1 }); if (r.items?.length) fk = faktaAset(r.items, { asOf: rs.value?.asOf || '' }) } catch { /* pakai fakta yang tampil */ }
+    const o = out.value
+    const dampak = executed.value ? [['Status', 'Penerbitan saham baru sudah tereksekusi; jumlah saham dan porsi publik kini sudah memuat dilusinya.']]
+      : o ? [['Saham baru', `${fmt(o.N / 1e6)} jt (${x2(o.N / o.S0)} saham sekarang)`], ['Porsi publik', `${fmt(o.f * 100, 2)}% menjadi ${fmt(o.pubAfter * 100, 2)}% bila publik tidak menebus`],
+        ['Nilai buku per saham', `${rp(o.vps)} (aset diakui sebesar nilai dibayar)`], ...(o.vpsSim != null ? [['Nilai buku per saham (simulasi)', `${rp(o.vpsSim)} (aset sebesar nilai tengah simulasi)`]] : [])] : null
+    const doc = await asetPdf({ t: props.ticker, riset: rs.value, aset: a.value, fakta: fk, ks: ks.value, sim: sim.value, nilai: val.value, mcap: mcapRp.value, dampak }, jsPDF)
+    doc.save(asetPdfName(props.ticker))
+  } catch (e) { errPdf.value = 'PDF gagal dibuat: ' + (e.message || e) } finally { busyPdf.value = false }
+}
+
+const sources = computed(() => [...(rs.value?.sumber || []).map(x => ({ t: x.t, url: x.url, ket: JENIS[x.jenis] || x.jenis })),
+  ...(a.value?.sumber || []).map(t => ({ t })), ...(r.value?.sumber || [])])
 </script>
 
 <template>
-  <Modal labelledby="injTitle" close-label="Tutup data aset" @close="emit('close')">
-    <template #title>
+  <div class="tab-aset">
+    <header class="hd rule-top">
+      <div class="unduh">
+        <button type="button" class="btn" :disabled="busyPdf || (!a && !rs)" @click="unduhPdf">{{ busyPdf ? 'Menyiapkan PDF…' : '⬇ Unduh riset aset (PDF)' }}</button>
+        <span v-if="errPdf" class="small muted">{{ errPdf }}</span>
+      </div>
       <div class="lbl">Aset yang diinjeksi ke {{ ticker }}</div>
       <h2 id="injTitle" class="t">{{ title }}</h2>
       <div v-if="sub" class="small muted">{{ sub }}</div>
       <div v-if="a" class="tags"><span class="tag" :class="'t-' + ks.tone">{{ ks.label }}</span><span v-if="ast.porsi" class="tag t-calm">porsi {{ ast.porsi.split(/[(;]/)[0].trim() }}</span></div>
+    </header>
+
+    <!-- Riset aset dari berbagai sumber (jurnal, media, situs perusahaan, regulator). -->
+    <template v-if="rs">
+      <section class="sec">
+        <h3 class="lbl">Ringkasan riset aset <span class="small muted">per {{ fmtDate(rs.asOf) }}</span></h3>
+        <p class="desc">{{ rs.ringkasan }}</p>
+      </section>
+      <section v-if="rs.entitas?.length" class="sec">
+        <h3 class="lbl">Entitas aset</h3>
+        <div class="ent">
+          <article v-for="e in rs.entitas" :key="e.nama" class="ec">
+            <b>{{ e.nama }}</b><div class="small muted">{{ e.peran }}</div>
+            <div v-if="e.lokasi" class="small">Lokasi: {{ e.lokasi }}</div>
+            <div v-if="e.berdiri && !/tidak diungkap/i.test(e.berdiri)" class="small">Berdiri: {{ e.berdiri }}</div>
+            <div v-if="e.kegiatan" class="small">{{ e.kegiatan }}</div>
+          </article>
+        </div>
+      </section>
+      <section v-if="rs.operasional?.length || fakta.length" class="sec">
+        <h3 class="lbl">Operasional</h3>
+        <dl class="kv">
+          <div v-for="f in fakta" :key="f.d + f.t" class="lap"><dt>{{ f.l }}<small>laporan {{ fmtDate(f.d) }}</small></dt>
+            <dd>{{ f.t }} <a :href="f.url" target="_blank" rel="noopener" class="sx" :title="f.judul">[laporan]</a><span v-if="f.baru" class="tag t-good">terbaru</span></dd></div>
+          <div v-for="o in rs.operasional || []" :key="o.l"><dt>{{ o.l }}</dt><dd>{{ o.t }}<sup v-if="src(o.s)" class="sx" :title="src(o.s).t">[{{ o.s + 1 }}]</sup></dd></div>
+        </dl>
+      </section>
+      <section v-if="rs.tambang" class="sec">
+        <h3 class="lbl">Tambang: lokasi, cadangan, dan umur</h3>
+        <dl class="kv"><template v-for="[f, l] in TB_R" :key="f"><div v-if="rs.tambang[f]"><dt>{{ l }}</dt><dd>{{ rs.tambang[f] }}</dd></div></template></dl>
+      </section>
+      <section v-if="rs.pasar" class="sec">
+        <h3 class="lbl">Pasar dan pelanggan</h3>
+        <p class="desc">{{ rs.pasar }}</p>
+      </section>
+      <section v-if="rs.keuangan?.length" class="sec">
+        <h3 class="lbl">Keuangan aset (riset)</h3>
+        <dl class="kv"><div v-for="o in rs.keuangan" :key="o.l"><dt>{{ o.l }}</dt><dd>{{ o.t }}<sup v-if="src(o.s)" class="sx" :title="src(o.s).t">[{{ o.s + 1 }}]</sup></dd></div></dl>
+      </section>
+      <section v-if="rs.pengendaliAset?.length" class="sec">
+        <h3 class="lbl">Aset lain milik pengendali</h3>
+        <div class="ent">
+          <article v-for="e in rs.pengendaliAset" :key="e.nama" class="ec">
+            <b>{{ e.nama }}</b><div class="small muted">{{ [e.jenis, e.lokasi].filter(Boolean).join(' · ') }}</div>
+            <div v-if="e.detail" class="small">{{ e.detail }}</div>
+            <div v-if="e.hubungan" class="small muted">Kaitan: {{ e.hubungan }}</div>
+          </article>
+        </div>
+      </section>
+      <section v-if="rs.jurnal?.length" class="sec">
+        <h3 class="lbl">Temuan jurnal ilmiah</h3>
+        <ul class="jr">
+          <li v-for="j in rs.jurnal" :key="j.judul"><a v-if="j.url" :href="j.url" target="_blank" rel="noopener"><b>{{ j.judul }}</b></a><b v-else>{{ j.judul }}</b>
+            <div class="small muted">{{ [j.penulis, j.tahun, j.terbitan].filter(Boolean).join(' · ') }}</div>
+            <div class="small">{{ j.temuan }}</div></li>
+        </ul>
+      </section>
+      <section v-if="rs.positif?.length || rs.risiko?.length" class="sec pr">
+        <div><h3 class="lbl">Pendukung nilai aset</h3><ul><li v-for="x in rs.positif" :key="x">{{ x }}</li></ul></div>
+        <div><h3 class="lbl">Risiko aset</h3><ul><li v-for="x in rs.risiko" :key="x">{{ x }}</li></ul></div>
+      </section>
+    </template>
+    <template v-else>
+      <p class="small muted">Riset aset lintas sumber untuk {{ ticker }} belum tersedia; data di bawah dari keterbukaan informasi.</p>
+      <section v-if="fakta.length" class="sec">
+        <h3 class="lbl">Operasional (dari laporan terakhir)</h3>
+        <dl class="kv"><div v-for="f in fakta" :key="f.d + f.t" class="lap"><dt>{{ f.l }}<small>laporan {{ fmtDate(f.d) }}</small></dt>
+          <dd>{{ f.t }} <a :href="f.url" target="_blank" rel="noopener" class="sx" :title="f.judul">[laporan]</a></dd></div></dl>
+      </section>
     </template>
 
-    <p v-if="!a && !r" class="muted">Data aset untuk {{ ticker }} belum ada.</p>
+    <p v-if="!a && !r && !rs" class="muted">Data aset untuk {{ ticker }} belum ada.</p>
 
     <template v-if="a">
       <section class="sec">
@@ -188,18 +302,19 @@ const sources = computed(() => [...(a.value?.sumber || []).map(t => ({ t })), ..
         Angka di sini tidak resmi dan tidak menambah progress.
       </p>
       <p v-if="ast.nama" class="small">Aset: <b>{{ ast.nama }}</b><template v-if="ast.porsi"> · porsi {{ ast.porsi }}</template><template v-if="ast.sektor"> · sektor {{ ast.sektor }}</template></p>
-      <div class="inputs">
-        <label v-for="[key, label, hint] in SIM_IN" :key="key" class="in" :for="fid(key)">
-          <span class="small">{{ label }}</span>
-          <input :id="fid(key)" v-model.number="si[key]" class="field" type="number" step="any">
-          <em class="small muted">{{ hint }}</em>
-        </label>
-      </div>
+      <!-- Data yang dipakai: otomatis dari dokumen aset dan Stockbit (tidak ada isian manual). -->
+      <dl class="inputs">
+        <div v-for="[key, label, hint] in SIM_IN" :key="key" class="in">
+          <dt class="small">{{ label }}</dt>
+          <dd class="v1" :class="{ muted: si[key] == null }">{{ showVal(key, si[key]) }}</dd>
+          <dd class="small muted">{{ hint }}</dd>
+        </div>
+      </dl>
       <p class="small muted">{{ peerUsed.length ? 'Pembanding (Stockbit): ' + peerUsed.join(', ') : 'Pembanding: ' + (a?.pembanding?.join(', ') || 'belum ditentukan') }}</p>
       <p v-if="sim.implied" class="small">Nilai transaksi tersirat <b>Rp{{ fmt(Math.round(sim.implied)) }}/ton</b> (sekitar USD{{ fmt(sim.implied / KURS.USD, 2) }}/ton) atas {{ fmt(si.res * sim.por, 1) }} juta ton porsi yang masuk.</p>
       <p v-if="sim.mid == null" class="note">
-        <template v-if="si.laba > 0 || si.pend > 0 || si.eq > 0">Belum bisa disimulasikan: kelipatan pembanding (PER, P/S, atau PBV) belum ada. Isi salah satunya di atas.</template>
-        <template v-else>Belum bisa disimulasikan: data keuangan aset target (laba, pendapatan, atau ekuitas) belum diungkap<template v-if="mining">, dan nilai per ton cadangan belum diisi</template>. Isi angkanya di atas sebagai skenario.</template>
+        <template v-if="si.laba > 0 || si.pend > 0 || si.eq > 0">Belum bisa disimulasikan: kelipatan pembanding (PER, P/S, atau PBV) dari Stockbit belum tersedia.</template>
+        <template v-else>Belum bisa disimulasikan: data keuangan aset target (laba, pendapatan, atau ekuitas) belum diungkap<template v-if="mining"> dan cadangan tambang belum diungkap</template>. Simulasi terhitung otomatis begitu datanya terbit (keterbukaan informasi / laporan KJPP).</template>
       </p>
       <template v-else>
         <table class="ledger">
@@ -216,16 +331,15 @@ const sources = computed(() => [...(a.value?.sumber || []).map(t => ({ t })), ..
       <h4 class="lbl sub">Dampak ke saham {{ ticker }}</h4>
       <p v-if="executed" class="small muted">Penerbitan saham baru sudah tereksekusi, jadi jumlah saham dan porsi publik saat ini sudah memuat dilusinya.</p>
       <template v-else>
-        <div class="inputs">
-          <label v-for="[key, label, hint] in DL_IN" :key="key" class="in" :for="fid('d' + key)">
-            <span class="small">{{ label }}</span>
-            <input :id="fid('d' + key)" v-model.number="dl[key]" class="field" type="number" step="any" min="0">
-            <em class="small muted">{{ hint }}</em>
-          </label>
-        </div>
-        <button v-if="sim.mid != null" type="button" class="btn" @click="useMid">Pakai nilai tengah simulasi ({{ big(sim.mid) }})</button>
+        <dl class="inputs">
+          <div v-for="[key, label] in DL_IN" :key="key" class="in">
+            <dt class="small">{{ label }}</dt>
+            <dd class="v1">{{ dlShow(key, dl[key]) }}</dd>
+            <dd class="small muted">{{ dlSrc[key] }}</dd>
+          </div>
+        </dl>
         <p v-if="!base.S0" class="small muted">Jumlah saham {{ ticker }} belum ada, jadi dilusi belum bisa dihitung.</p>
-        <p v-else-if="!out" class="small muted">Isi harga pelaksanaan.</p>
+        <p v-else-if="!out" class="small muted">Harga pelaksanaan belum tersedia.</p>
         <dl v-else class="out" aria-live="polite">
           <div><dt>Saham baru</dt><dd><b>{{ fmt(out.N / 1e6) }} jt</b><span>{{ x2(out.N / out.S0) }} saham sekarang</span></dd></div>
           <div><dt>Porsi publik</dt><dd><b>{{ fmt(out.pubAfter * 100, 2) }}%</b><span>dari {{ fmt(out.f * 100, 2) }}%</span></dd></div>
@@ -290,25 +404,36 @@ const sources = computed(() => [...(a.value?.sumber || []).map(t => ({ t })), ..
       </section>
     </template>
 
-    <details v-if="a?.tidakDitemukan?.length" class="more">
-      <summary>Data yang belum diungkap ({{ a.tidakDitemukan.length }})</summary>
-      <ul class="small"><li v-for="x in a.tidakDitemukan" :key="x">{{ x }}</li></ul>
+    <details v-if="a?.tidakDitemukan?.length || rs?.belumDitemukan?.length" class="more">
+      <summary>Data yang belum diungkap ({{ (a?.tidakDitemukan?.length || 0) + (rs?.belumDitemukan?.length || 0) }})</summary>
+      <ul class="small"><li v-for="x in [...(rs?.belumDitemukan || []), ...(a?.tidakDitemukan || [])]" :key="x">{{ x }}</li></ul>
     </details>
 
     <section v-if="sources.length" class="sec">
       <h3 class="lbl">Sumber</h3>
-      <ul class="small">
+      <ol class="small">
         <li v-for="s in sources" :key="s.t">
           <a v-if="s.url" :href="s.url" target="_blank" rel="noopener">{{ s.t }}</a><template v-else>{{ s.t }}</template>
           <template v-if="s.ket"> · {{ s.ket }}</template>
         </li>
-      </ul>
+      </ol>
       <p v-if="r?.asOf" class="small muted">Data relasi per {{ fmtDate(r.asOf) }}.</p>
     </section>
-  </Modal>
+  </div>
 </template>
 
 <style scoped>
+.tab-aset{display:flex;flex-direction:column;gap:16px}
+.hd{padding-top:10px;position:relative}
+.unduh{float:right;display:flex;align-items:center;gap:8px;margin:0 0 6px 12px}
+.ent{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:10px;margin-top:6px}
+.ec{border:1px solid var(--rule);background:var(--sheet);padding:8px 12px;display:flex;flex-direction:column;gap:3px}
+.lap dt small{display:block;font:500 11px var(--f-body);text-transform:none;letter-spacing:0;color:var(--muted)}
+.lap .tag{margin-left:6px}
+.sx{color:var(--accent);font-size:10px;margin-left:2px;cursor:help}
+.jr{list-style:none;padding:0}.jr li{border-bottom:1px solid var(--rule-2);padding:6px 0}
+.pr{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media (max-width:760px){.pr{grid-template-columns:1fr}}
 .t{font-size:30px;line-height:1.05;margin:2px 0}
 .lbl{margin:0 0 6px}
 .lbl.sub{margin:14px 0 6px}
@@ -348,9 +473,8 @@ const sources = computed(() => [...(a.value?.sumber || []).map(t => ({ t })), ..
 .inputs{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:3px 14px;margin:10px 0}
 /* Subgrid: label, isian, dan petunjuk sejajar antar kolom walau label terlipat. */
 .in{display:grid;grid-template-rows:subgrid;grid-row:span 3;align-items:end;margin-bottom:8px}
-.in em{align-self:start}
-.in input{width:100%;font:700 16px var(--f-display)}
-.in em{font-style:normal}
+.in dd{margin:0;align-self:start}
+.in .v1{font:700 16px var(--f-display);align-self:end}
 .note{padding:8px 12px;background:var(--warn-bg);color:var(--warn)}
 .verdict{padding:8px 12px;font-weight:600}
 .v-good{background:var(--good-bg);color:var(--good)}

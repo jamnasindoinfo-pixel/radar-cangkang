@@ -186,6 +186,41 @@ const MAX_PER_ROW = 5
 const SUB_ROW_GAP = 190
 const chunk = (a, n) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n))
 
+// Lensa Alur saham: relasi kurasi yang padat dipilah per sudut pandang. Node memilih lensanya
+// lewat `l: ['kendali', ...]` dan boleh pindah baris per lensa lewat `lr: { pengurus: 1 }` atau diberi posisi tengah
+// tetap `lp: { pengurus: [x, y] }` (dipakai hanya bila semua node lensa itu punya lp); garis boleh
+// membatasi diri lewat elemen ke-5 `[dari, ke, jenis, label, [lensa]]`.
+// Kotak emiten selalu tampil; node tanpa `l` hanya tampil di "Semua".
+export const LENSES = [['kendali', 'Kendali'], ['arus', 'Arus saham'], ['pengurus', 'Pengurus'], ['aset', 'Aset'], ['semua', 'Semua']]
+export const lensesOf = rel => LENSES.filter(([k]) => k !== 'semua' && rel?.nodes?.some(n => n.l?.includes(k)))
+
+export function lensOf(rel, lens) {
+  if (!rel?.nodes || !lens || lens === 'semua') return rel
+  // Koordinat lama dibuang supaya layoutRows menata ulang subset tanpa celah.
+  const nodes = rel.nodes.filter(n => n.id === 'em' || n.l?.includes(lens))
+    .map(({ x, y, ...n }) => {
+      const p = n.lp?.[lens]
+      return p ? { ...n, x: p[0], y: p[1] } : { ...n, row: n.lr?.[lens] ?? n.row }
+    })
+  const ids = new Set(nodes.map(n => n.id))
+  const edges = (rel.edges || []).filter(e => ids.has(e[0]) && ids.has(e[1]) && (!e[4] || e[4].includes(lens)))
+  return layoutRows({ ...rel, nodes, edges })
+}
+
+// Tata letak tersimpan satu objek per emiten: kunci `id` untuk "Semua", `lensa:id` untuk lensa lain.
+export const layoutFor = (saved = {}, lens) => lens === 'semua'
+  ? Object.fromEntries(Object.entries(saved).filter(([k]) => !k.includes(':')))
+  : Object.fromEntries(Object.entries(saved).filter(([k]) => k.startsWith(lens + ':')).map(([k, v]) => [k.slice(lens.length + 1), v]))
+export function mergeLayout(saved = {}, lens, pos) {
+  const mine = k => (lens === 'semua' ? !k.includes(':') : k.startsWith(lens + ':'))
+  const keep = Object.entries(saved).filter(([k]) => !mine(k))
+  const add = Object.entries(pos).map(([id, v]) => [lens === 'semua' ? id : lens + ':' + id, v])
+  return Object.fromEntries([...keep, ...add])
+}
+
+// Baris tabel arus saham; bila node dipilih, hanya baris yang melibatkan node itu.
+export const transfersOf = (rel, id) => (rel?.transfers || []).filter(t => !id || t.dari === id || t.ke === id)
+
 // Kunci pencocokan nama pihak lintas emiten: abaikan bentuk badan hukum dan tanda baca.
 export const entityKey = s => String(s || '').toLowerCase()
   .replace(/\b(pt|tbk|ltd|pte|limited|holdings?|group|grup|inc|co)\b|[.,()]/g, ' ').replace(/\s+/g, ' ').trim()

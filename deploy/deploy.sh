@@ -2,6 +2,7 @@
 # CD lokal radar-cangkang, dijalankan systemd timer di jni-server tiap 2 menit (deploy/radar-deploy.timer).
 # Ada commit baru di origin/main → uji di worktree terpisah (tes frontend, tes server, build) → bila lulus,
 # perbarui folder live, build, restart, cek kesehatan; cek gagal = kembali otomatis ke versi sebelumnya.
+# Setelah hidup: deploy/cek_pasca.py memeriksa halaman utama + JS (kritis) dan isi data penting (peringatan).
 # Status terakhir: .ci/status.json (juga tampil di /api/status → "deploy"); riwayat: .ci/deploy.log.
 set -euo pipefail
 
@@ -46,15 +47,24 @@ apply() {  # apply <commit-lama-untuk-cek-lockfile>
   if ! git diff --quiet "$1" HEAD -- frontend/package-lock.json; then (cd frontend && npm_ci); fi
   (cd frontend && npm run build >"$STATE/build.log" 2>&1) || return 1
   systemctl --user restart "$SERVICE"
+  local hidup=1
   for _ in $(seq 1 20); do
     sleep 1
-    curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/status" && return 0
+    curl -sf -o /dev/null "http://127.0.0.1:$PORT/api/status" && { hidup=0; break; }
   done
-  return 1
+  [ "$hidup" = 0 ] || return 1
+  # Halaman utama/JS tidak termuat = kritis (kode keluar 2) -> kembali ke versi sebelumnya.
+  python3 deploy/cek_pasca.py "$PORT" >"$STATE/cek.json" || return 1
 }
 if apply "$CUR"; then
-  log "LIVE $SHORT"
-  status "$SHORT" "live" "tes, build, dan cek kesehatan lulus"
+  PER=$(python3 -c 'import json,sys; print("; ".join(json.load(open(sys.argv[1]))["peringatan"]))' "$STATE/cek.json" 2>/dev/null || true)
+  if [ -n "$PER" ]; then
+    log "LIVE $SHORT, peringatan: $PER"
+    status "$SHORT" "live" "tes, build, dan cek kesehatan lulus; peringatan data: $PER"
+  else
+    log "LIVE $SHORT"
+    status "$SHORT" "live" "tes, build, cek kesehatan, dan cek isi data lulus"
+  fi
 else
   log "cek gagal setelah deploy $SHORT, kembali ke $(git rev-parse --short "$CUR")"
   git reset -q --keep "$CUR"

@@ -38,11 +38,15 @@ describe('pickTheme', () => {
 
 describe('short', () => {
   it('teks pendek tidak diubah', () => expect(short('Halo dunia', 20)).toBe('Halo dunia'))
-  it('memotong di batas kalimat atau kata, tidak di tengah kata', () => {
-    const s = short('Pengendali baru masuk lewat tender wajib dan menyiapkan inbreng aset tambang senilai besar', 40)
-    expect(s.length).toBeLessThanOrEqual(40)
-    expect(s.endsWith('…')).toBe(true)
-    expect(s).not.toMatch(/\s…$/)
+  it('tidak memotong kalimat: ambil kalimat lengkap yang muat', () => {
+    expect(short('Pengendali baru masuk lewat tender wajib. Inbreng aset tambang menyusul tahun depan.', 50)).toBe('Pengendali baru masuk lewat tender wajib.')
+  })
+  it('kalimat pertama yang panjang tetap utuh, tanpa elipsis', () => {
+    const t = 'Inbreng 45% TCP senilai Rp1,6 T pada harga indikatif Rp450–550, jauh di atas harga Rp106.'
+    expect(short(t, 60)).toBe(t)
+  })
+  it('singkatan "maks." bukan akhir kalimat', () => {
+    expect(short('Nilai injeksi BTL (maks. USD125 juta) besar. Pantau KJPP.', 45)).toBe('Nilai injeksi BTL (maks. USD125 juta) besar.')
   })
 })
 
@@ -62,5 +66,26 @@ describe('buildDeck', () => {
   })
   it('nama berkas aman', () => {
     expect(deckFileName('ABCD', '2026-10-21', { name: 'Arang & Amber' })).toBe('ABCD_Analisa_2026-10-21_Arang-Amber.pptx')
+  })
+})
+
+describe('buildDeck: rekomendasi & PDF', () => {
+  it('ringkasan & rekomendasi di bagian penutup (setelah analisa), PDF sama jumlah halamannya', async () => {
+    const { recommend } = await import('../recommend.js')
+    const { jsPDF } = await import('jspdf')
+    const { deckToPdf } = await import('../deckPdf.js')
+    const d2 = { t: 'ABCD', name: 'PT Abcd Tbk', sector: SECTORS.find(s => s.id === 'umum'), date: '2026-10-22',
+      A: { score: 50, price: 100, dims: [{ k: 'Pengendali', s: 5, why: ['a.', 'b.'] }], p: { metrics: { pbv: 1.2, per: 10, equity: 1e11, cash: 1e10 } }, sv: {}, levels: [['Harga PTW', '', 120]], checks: ['x'], exits: ['y'] },
+      pa: { sikap: 'Netral', tesis: 'Kalimat pertama yang cukup panjang. Kalimat kedua yang juga cukup panjang.', variabelKunci: ['v'], tesisSalahBila: ['w'] },
+      pc: { pros: [], cons: [] }, deep: [], steps: [], milestones: [], reports: [] }
+    d2.rec = recommend(d2)
+    const pres = buildDeck(PptxGenJS, d2, Object.values(THEMES).flat()[0])
+    const titles = pres.slides.map(s => s._slideObjects.map(o => o.text?.[0]?.text || '').join(' '))
+    // Ringkasan rekomendasi di awal (setelah sampul); rekomendasi lengkap tetap di akhir, sebelum kesimpulan.
+    expect(titles.findIndex(t => /RINGKASAN REKOMENDASI/.test(t))).toBe(1)
+    const iRek = titles.findIndex(t => /\d+\. REKOMENDASI/.test(t)), iSkor = titles.findIndex(t => /SKOR ANALISIS/.test(t))
+    expect(iRek).toBeGreaterThan(iSkor)
+    expect(iRek).toBeGreaterThan(titles.length - 6)
+    expect((await deckToPdf(pres, jsPDF)).getNumberOfPages()).toBe(pres.slides.length)
   })
 })

@@ -16,6 +16,7 @@ import Modal from '../components/emiten/Modal.vue'
 import PotensiCells from '../components/monitor/PotensiCells.vue'
 import StoryCells from '../components/monitor/StoryCells.vue'
 import NetworkMap from '../components/NetworkMap.vue'
+import AuditBox from '../components/monitor/AuditBox.vue'
 
 const TRACK = ['PPJB', 'PTW', 'RUPSLB', 'Injeksi', 'Selesai']
 const SIKAP = [['Hindari', 'Hindari'], ['Spekulatif tinggi', 'Spekulatif'], ['Netral', 'Netral'], ['Asimetri positif', 'Asimetri+']]
@@ -41,6 +42,14 @@ watch(() => route.query.set, v => { if (validSet(v)) set.value = v })
 // Set Story butuh profil & riwayat pemegang dari Stockbit; loadStories hanya menarik yang belum ada/basi.
 watch(() => set.value === 'story' && store.ready, on => { if (on) loadStories() }, { immediate: true })
 const box = ref(null)
+// Isi tampilan (kartu/tabel) tertutup saat halaman dibuka; muncul setelah salah satu pilihan diklik, dan klik pilihan
+// yang sedang aktif menutupnya lagi. ?set= di URL membukanya langsung.
+const buka = ref(!!validSet(route.query.set))
+function pilihSet(id) {
+  if (buka.value && set.value === id) { buka.value = false; return }
+  buka.value = true
+  setSet(id)
+}
 function setSet(id) {
   set.value = id
   if (box.value) box.value.scrollLeft = 0
@@ -310,7 +319,8 @@ onMounted(() => autoRefresh('stockbit'))
       </div>
     </header>
 
-    <AgendaBlock v-if="set !== 'hari'" :note="agendaNote" :can-mark="nNew > 0" @seen="markSeen" />
+    <AgendaBlock v-if="!buka || set !== 'hari'":note="agendaNote" :can-mark="nNew > 0" @seen="markSeen" />
+    <AuditBox />
 
     <div class="bar-row">
       <div class="fbar">
@@ -323,18 +333,18 @@ onMounted(() => autoRefresh('stockbit'))
       </div>
       <div role="group" aria-label="Tampilan tabel" class="seg">
         <span class="lbl">Tampilan</span>
-        <button v-for="[id, label] in SETS" :key="id" type="button" :aria-pressed="String(set === id)" @click="setSet(id)">{{ label }}</button>
+        <button v-for="[id, label] in SETS" :key="id" type="button" :aria-pressed="String(buka && set === id)" @click="pilihSet(id)">{{ label }}</button>
       </div>
       <span class="muted small" aria-live="polite">{{ countTxt }}</span>
     </div>
     <!-- Nyaris lolos dikelompokkan per alasan; daftar kode dilipat supaya tidak memenuhi halaman. -->
-    <details v-if="nearMiss.length" class="near small">
+    <details v-if="buka && nearMiss.length" class="near small">
       <summary><b>{{ nearMiss.length }} emiten nyaris lolos</b> <span class="muted">(gagal 1 filter): {{ nearGroups.map(g => g.n + ' ' + g.why).join(', ') }}</span></summary>
       <div v-for="g in nearGroups" :key="g.why" class="ng"><span class="muted">{{ g.why }}:</span>
         <RouterLink v-for="t in g.t" :key="t" class="ticker" :to="'/emiten/' + t">{{ t }}</RouterLink></div>
     </details>
 
-    <p v-if="set === 'potensi'" class="potsum small">
+    <p v-if="buka && set === 'potensi'" class="potsum small">
       <template v-if="potSum.n">
         <b>{{ potSum.n }}</b> transaksi pembanding · kenaikan median pra-rumor ke puncak <b>{{ potSum.runup }}</b>
         · harga kini terhadap saat PTW <b>{{ potSum.post }}</b> (median)
@@ -345,7 +355,8 @@ onMounted(() => autoRefresh('stockbit'))
       <span v-else class="muted">Data siklus harga belum tersedia{{ bmError ? ': ' + bmError : '' }}. Butuh server dengan token Stockbit aktif.</span>
     </p>
 
-    <TodayCards v-if="set === 'hari'" :rows="rows" />
+    <p v-if="!buka" class="muted small tutup">Pilih Hari ini, Ringkas, Progress, Potensi, atau Story untuk menampilkan daftar emiten.</p>
+    <TodayCards v-else-if="set === 'hari'" :rows="rows" />
     <section v-else id="progTable" ref="box" aria-label="Daftar emiten" class="sheet box">
       <table class="ledger" :class="'set-' + set">
         <thead><tr>
@@ -358,7 +369,9 @@ onMounted(() => autoRefresh('stockbit'))
         <tbody>
           <tr v-for="r in rows" :key="r.t">
             <template v-if="set === 'ringkas'">
-              <td><RouterLink class="ticker" :to="'/emiten/' + r.t">{{ r.t }}</RouterLink></td>
+              <td><RouterLink class="ticker" :to="'/emiten/' + r.t">{{ r.t }}</RouterLink>
+                <!-- Masuk otomatis dari Kandidat: "rencana" = pengambilalihan diumumkan, belum terkonfirmasi KSEI. -->
+                <span v-if="r.item.auto" class="tag" :class="r.item.autoJenis === 'rencana' ? 't-warn' : 't-calm'" :title="r.item.notes">{{ r.item.autoJenis === 'rencana' ? 'rencana' : 'otomatis' }}</span></td>
               <td>
                 <StageTrack :item="r.item" />
                 <span class="pct small" :title="r.prog.est ? 'Perkiraan dari tahap; tahapan belum terisi' : 'Penyelesaian transaksi'">{{ r.prog.est ? '±' : '' }}{{ r.prog.pct }}%</span>
@@ -399,7 +412,7 @@ onMounted(() => autoRefresh('stockbit'))
       <summary><h2>Peta jaringan pengendali</h2></summary>
       <NetworkMap v-if="netOpen" :heading="false" />
     </details>
-    <p v-if="set === 'ringkas'" class="muted foot">Persen di kolom Tahap = penyelesaian transaksi (± = perkiraan dari tahap). Bar hijau = rentang nilai wajar dari pandangan analis, garis hitam = harga. Selisih merah = di atas batas atas, hijau = di bawah batas bawah, 0% = di dalam rentang. Tanggal oranye = laporan baru sejak ditandai dilihat; baris itu naik ke atas. Δ = perubahan harga sesi terakhir.</p>
+    <p v-if="buka && set === 'ringkas'" class="muted foot">Persen di kolom Tahap = penyelesaian transaksi (± = perkiraan dari tahap). Bar hijau = rentang nilai wajar dari pandangan analis, garis hitam = harga. Selisih merah = di atas batas atas, hijau = di bawah batas bawah, 0% = di dalam rentang. Tanggal oranye = laporan baru sejak ditandai dilihat; baris itu naik ke atas. Δ = perubahan harga sesi terakhir.</p>
     <details class="sheet cyc method">
       <summary><h2>Metodologi skor</h2></summary>
       <p class="muted small">Skor penyaringan = jumlah bobot faktor yang terpenuhi, total 100. Faktor otomatis dihitung dari data pasar.</p>

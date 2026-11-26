@@ -91,10 +91,10 @@
                  "injectType":  "Akuisisi saham (29,88%)",
                  "injectTarget":  "PT Sinergi Inti Andalan Prima Tbk (INET)",
                  "nominal":  "Rp2,01 T",
-                 "target":  "RUPSLB 9 November 2026",
-                 "sourceDate":  "2026-10-01",
-                 "sourceTitle":  "Rencana Transaksi Material Dengan Persetujuan RUPS",
-                 "note":  "Akuisisi dilakukan lewat entitas anak dan didanai pinjaman pemegang saham hingga Rp2 T. Ada juga rencana PMHMETD I maksimal 154,78 miliar saham yang menunggu RUPSLB yang sama."
+                 "target":  "Disetujui RUPSLB 9 November 2026; menunggu pernyataan efektif PMHMETD I",
+                 "sourceDate":  "2026-11-10",
+                 "sourceTitle":  "Ringkasan Risalah Rapat Umum Para Pemegang Saham Luar Biasa",
+                 "note":  "Akuisisi dilakukan lewat entitas anak dan didanai pinjaman pemegang saham hingga Rp2 T. Ada juga rencana PMHMETD I maksimal 154,78 miliar saham yang menunggu RUPSLB yang sama. Tender wajib Rp148 berakhir nihil (4 Nov 2026); keterbukaan tambahan 5 Nov 2026 menegaskan pinjaman SII hingga Rp5 T (penarikan awal Rp2 T) dan rasio PMHMETD 20:1."
              },
     "EPAC":  {
                  "baru":  "Holding investasi (injeksi perusahaan teknologi)",
@@ -203,10 +203,10 @@
                  "injectType":  "Penambahan modal (HMETD)",
                  "injectTarget":  "",
                  "nominal":  "",
-                 "sourceDate":  "2026-09-29",
-                 "sourceTitle":  "Penjelasan atas Permintaan Penjelasan Bursa",
+                 "sourceDate":  "2026-11-10",
+                 "sourceTitle":  "Informasi atau fakta material sehubungan dengan perubahan pengendalian terhadap Perseroan",
                  "note":  "PT Nawasena Nugra Investama mengambil alih 66,58%; PMHMETD baru sebatas rencana tanpa nilai, jadwal, atau bisnis baru yang disebutkan.",
-                 "target":  "Belum ditetapkan; nilai dan jadwal penyelesaian akuisisi masih dinegosiasikan. Agenda terdekat: RUPSLB 23 Oktober 2026 (perubahan pengurus dan penyesuaian Pasal 3 AD ke KBLI 2025)",
+                 "target":  "Tender wajib oleh PT Nawasena Nugra Investama (harga dan jadwal belum diumumkan); pengambilalihan 66,58% di Rp53,73 tuntas",
                  "sumberTambahan":  [
                                         "Saham IDEA Melonjak usai Nawa Capital Bidik Akuisisi 66,58% — Fortune IDN, 2026-09-16",
                                         "Nawasena Nugra Negosiasi Akuisisi 66,58% Idea Indonesia Akademi (IDEA) — Investortrust, 2026-09-16",
@@ -222,7 +222,7 @@
                  "target":  "Akhir tahun 2026",
                  "sourceDate":  "2026-05-22",
                  "sourceTitle":  "Persetujuan Transaksi Material dengan RUPS Independen (KOREKSI)",
-                 "note":  "Akuisisi 99% saham ditargetkan rampung akhir tahun, tetapi per 9 Oktober 2026 RUPS Independen ditunda atas arahan OJK dan Ruby Mining menunda penyelesaian transaksi; aset hotel dijual Rp113,5 miliar.",
+                 "note":  "Akuisisi 99% saham ditargetkan rampung akhir tahun, tetapi per 9 Oktober 2026 RUPS Independen ditunda atas arahan OJK dan Ruby Mining menunda penyelesaian transaksi; aset hotel dijual Rp113,5 miliar. Per 5 Nov 2026 rencana pengambilalihan oleh Ruby Mining Hongkong diakhiri (PJB bersyarat 86% berakhir).",
                  "sumberTambahan":  [
                                         "Puri Sentul Permai (KDTN) Dilirik Investor Hong Kong — IDX Channel, 2025-11-21",
                                         "Pemilik Hotel Kedaton 8 Banting Setir ke Sektor Tambang Pascaakuisisi — IDNFinancials, 2026 (tanggal tidak tercantum di hasil)",
@@ -277,9 +277,9 @@
                  "injectType":  "Penambahan modal (HMETD)",
                  "injectTarget":  "PT Nextier Askara Center \u0026 PT Nextier GenAi Center",
                  "nominal":  "Rp2,54 T",
-                 "target":  "22 Oktober 2026",
-                 "sourceDate":  "2026-09-10",
-                 "sourceTitle":  "Keterbukaan Informasi terkait Aksi Korporasi - Rencana Penambahan Modal dengan HMETD - 10092026",
+                 "target":  "HMETD MGLV-R dilaksanakan 10-23 November 2026 di Rp20; sekitar 184,7 juta saham baru tercatat s.d. 23 November (total sekitar 2,09 miliar saham)",
+                 "sourceDate":  "2026-11-20",
+                 "sourceTitle":  "Pencatatan Saham",
                  "note":  "Akuisisi NAC dan NGC sudah selesai 7 September 2026 tanpa nilai yang diungkap; Rp2,54 T adalah nilai maksimal PMHMETD I untuk pelunasan pengambilalihan, utang ke NDC, dan modal kerja.",
                  "executed":  true,
                  "sumberTambahan":  [
@@ -307,13 +307,13 @@
              },
     "NAYZ":  {
                  "baru":  "Telekomunikasi dan teknologi",
-                 "sourceTitle":  "Laporan Informasi atau Fakta Material (Perjanjian Pengalihan Saham Bersyarat)",
+                 "sourceTitle":  "Laporan Hasil Penawaran Tender Wajib atas saham PT Hassana Boga Sejahtera Tbk",
                  "nominal":  "maks. USD125 juta",
-                 "sourceDate":  "2026-10-05",
+                 "sourceDate":  "2026-11-13",
                  "note":  "Nilai transaksi maksimal USD125 juta; bila nilai penilai independen lebih rendah, nilai penilai yang dipakai. 20% saham BTL dibayar tunai, 80% diinbrengkan Saiko dalam PMHMETD. Butuh persetujuan RUPS Independen.",
                  "injectTarget":  "Bangkok Tellink Co., Ltd. (75%)",
                  "injectType":  "Inbreng saham (HMETD) + tunai",
-                 "target":  "Belum ada tanggal pasti (indikatif): RUPS Independen dan PMHMETD dijadwalkan setelah tender wajib selesai (5 Oktober–3 November 2026, pembayaran 10 November 2026); RUPSLB PMHMETD ditargetkan dalam 12 bulan sejak 22 Juli 2026 (sekitar Juli 2027)",
+                 "target":  "Tender wajib selesai 10 November 2026 (Saiko kini 37,02%); berikutnya RUPS Independen dan PMHMETD, RUPSLB PMHMETD ditargetkan dalam 12 bulan sejak 22 Juli 2026 (sekitar Juli 2027)",
                  "sumberTambahan":  [
                                         "NAYZ Siapkan Rights Issue untuk Inbreng Usaha Saiko, Rencana Penggunaan Kas Masih Dibahas — Stockwatch.id, 2026-07-23",
                                         "NAYZ Akuisisi Bangkok Tellink, Bisnis Makanan Bayi Dilepas Bertahap — EmitenNews, 2026-10-05",
@@ -323,9 +323,9 @@
              },
     "NINE":  {
                  "baru":  "Tambang batu bara (rencana)",
-                 "target":  "RUPSLB 18 November 2026",
-                 "sourceDate":  "2026-10-12",
-                 "sourceTitle":  "Keterbukaan Informasi sehubungan dengan Rencana PMHMETD I",
+                 "target":  "Disetujui RUPSLB 18 November 2026 (PMHMETD I maks 2,44 miliar saham, dilusi maks 53,11%; juga penerbitan surat utang); harga pelaksanaan dan pernyataan efektif belum diumumkan",
+                 "sourceDate":  "2026-11-20",
+                 "sourceTitle":  "Ringkasan Risalah Rapat Umum Para Pemegang Saham Luar Biasa",
                  "injectType":  "Aset tambang (opsi beli)",
                  "injectTarget":  "Aset tambang Poh Group (PGGR), Mongolia",
                  "nominal":  "indikatif ±USD150 juta",
@@ -459,7 +459,7 @@
                  "sourceDate":  "2026-07-23",
                  "sourceTitle":  "Tanggapan atas Permintaan Penjelasan Bursa",
                  "injectTarget":  "PT Sumber Prima Anugrah Abadi (pengolahan daging; porsi belum diungkap) dan kerja sama strategis Bakso Sumber Seleras (ejaan IDX Channel)",
-                 "note":  "Visionary Capital Global mengambil alih 56,84% senilai Rp40,6 M (harga akuisisi pengendali, bukan injeksi). Rights issue akhir 2026 tanpa nilai. Dana rights issue (PMHMETD) direncanakan untuk pengembangan usaha, termasuk akuisisi PT Sumber Prima Anugrah Abadi; pelaksanaan ditargetkan akhir 2026 dengan syarat pencabutan suspensi, kondisi pasar, dan persetujuan regulator. Jumlah saham, harga, dan nilai belum diungkap.",
+                 "note":  "Visionary Capital Global mengambil alih 56,84% senilai Rp40,6 M (harga akuisisi pengendali, bukan injeksi). Rights issue akhir 2026 tanpa nilai. Dana rights issue (PMHMETD) direncanakan untuk pengembangan usaha, termasuk akuisisi PT Sumber Prima Anugrah Abadi; pelaksanaan ditargetkan akhir 2026 dengan syarat pencabutan suspensi, kondisi pasar, dan persetujuan regulator. Jumlah saham, harga, dan nilai belum diungkap. Tender wajib Rp56 per saham (maks. 21,47%) berlangsung 9 Nov-8 Des 2026.",
                  "sumberTambahan":  [
                                         "Keterbukaan Informasi atas Informasi atau Fakta Material — Stockbit Reports, 2026-10-05",
                                         "Laporan Hasil Public Expose - Tahunan — Stockbit Reports, 2026-06-15",
@@ -474,9 +474,9 @@
                  "injectType":  "Inbreng saham (PMHMETD IV)",
                  "injectTarget":  "PT Frisian Flag Indonesia (100%)",
                  "nominal":  "Rp14,57 T",
-                 "target":  "RUPSLB 27 Oktober 2026",
-                 "sourceDate":  "2026-09-18",
-                 "sourceTitle":  "Rencana Transaksi Material Dengan Persetujuan RUPS",
+                 "target":  "Disetujui RUPSLB 6 November 2026; perdagangan HMETD 14-20 Januari 2027",
+                 "sourceDate":  "2026-11-10",
+                 "sourceTitle":  "Penyampaian Prospektus",
                  "note":  "FrieslandCampina International Holding B.V. akan menjadi pengendali baru. Tanggal penyelesaian inbreng belum disebut."
              },
     "VISI":  {
@@ -484,9 +484,9 @@
                  "injectType":  "Rumah sakit",
                  "injectTarget":  "PT Hasna Medika Bakti Cirebon (72,91%)",
                  "nominal":  "Rp286 miliar",
-                 "sourceDate":  "2026-10-02",
-                 "sourceTitle":  "Ringkasan Risalah RUPSLB dan RUPS Independen",
-                 "target":  "Kuartal IV 2026, selambat-lambatnya 23 Oktober 2026 (RUPSLB 30 September 2026 sudah menyetujui)",
+                 "sourceDate":  "2026-11-12",
+                 "sourceTitle":  "Laporan Informasi atau Fakta Material",
+                 "target":  "Rampung 30 Oktober 2026: VISI memegang 72,91% HMBC (pembelian saham lama dan pengambilan bagian saham baru)",
                  "note":  "RUPSLB 30 September 2026 sudah menyetujui. Nilai Rp286 miliar dari laporan 25 Agustus 2026 (Rp255 M saham baru + Rp31 M pembelian), didanai PMTHMETD. Ringkasan Stockbit atas laporan 28 September 2026 menyebut total nilai transaksi Rp319,45 M, berbeda dari Rp286 M (Rp255 M saham baru + Rp31 M pembelian) di laporan 25 Agustus 2026 dan media; perlu verifikasi ke dokumen keterbukaan. Harga pelaksanaan dan investor PMTHMETD belum diungkap.",
                  "sumberTambahan":  [
                                         "VISI Akuisisi Hasna Medika Rp286 Miliar, Kuasai 72,91 Persen — Fortune IDN, 2026-08-26",
@@ -541,9 +541,9 @@
                  "injectType":  "",
                  "injectTarget":  "",
                  "nominal":  "",
-                 "target":  "",
-                 "sourceDate":  "2026-07-09",
-                 "sourceTitle":  "Pendirian anak usaha",
+                 "target":  "RUPSLB 18 Desember 2026 (agenda belum dirinci)",
+                 "sourceDate":  "2026-11-11",
+                 "sourceTitle":  "Pemberitahuan Rencana Rapat Umum Pemegang Saham Luar Biasa",
                  "note":  "Pendirian PT Pacific Construction Group (51%) dan PT Koka Trading International (98%), bukan injeksi aset. Tidak ada rencana injeksi aset: penjelasan 24 Juli 2026 menyatakan tidak ada aksi korporasi dalam 3 bulan. Ekspansi berjalan lewat anak usaha baru (Pacific Construction Group 51%, Koka Trading International 98%) dan kontrak konstruksi (Rp31,30 M dan Rp52,04 M). Rencana awal Ningbo Lixing mengambil 63,50% belum terealisasi; harga akhir dan tanggal penyelesaian masih dibahas (CNBC, 20 November 2025).",
                  "sumberTambahan":  [
                                         "Penjelasan atas Volatilitas Transaksi — Stockbit Reports, 2026-07-24",
@@ -575,10 +575,10 @@
                  "injectType":  "",
                  "injectTarget":  "",
                  "nominal":  "",
-                 "sourceDate":  "2026-06-08",
-                 "sourceTitle":  "Pernyataan Penawaran Tender Sukarela",
+                 "sourceDate":  "2026-11-16",
+                 "sourceTitle":  "Ringkasan Risalah Rapat Umum Para Pemegang Saham Luar Biasa",
                  "baru":  "Tetap: infrastruktur kabel serat optik/SKKL dan jaringan telekomunikasi (sinergi ekosistem telekomunikasi Grup Sinar Mas)",
-                 "target":  "RUPSLB 12 November 2026 (konfirmasi pengendali hasil tender sukarela dan perubahan direksi/komisaris)",
+                 "target":  "Disetujui RUPSLB 12 November 2026: perubahan pengendali dikonfirmasi; Vidcy Octory Direktur Utama, Marlo Budiman Komisaris Utama",
                  "note":  "Ada laporan \u0027Rencana Transaksi Perubahan Kegiatan Usaha\u0027 (2025-09-29) tanpa rincian; Rp520,09 miliar adalah nilai tender sukarela IMBS, bukan injeksi. Tidak ada rencana injeksi aset yang diumumkan; motif akuisisi adalah sinergi usaha dan penguatan posisi grup di infrastruktur telekomunikasi. Crossing 28 September 2026: 994,44 juta saham di Rp523 (sekitar Rp520,06 M) adalah harga pengendali, bukan injeksi. IMBS dimiliki 99% PT DSST Mas Gemilang. Merger EMR (anak usaha DSSA) ke MORA adalah transaksi terpisah; KETR sudah bermitra 50:50 dengan MORA di SKKL RISING-8.",
                  "sumberTambahan":  [
                                         "Pemanggilan RUPSLB — Stockbit Reports, 2026-10-13",
@@ -610,9 +610,9 @@
                  "injectType":  "Penambahan modal tanpa HMETD (private placement)",
                  "injectTarget":  "",
                  "nominal":  "Rp125 M",
-                 "target":  "Pencatatan BEI 11 Desember 2026",
-                 "sourceDate":  "2026-09-29",
-                 "sourceTitle":  "Penambahan modal tanpa HMETD - Penempatan Terbatas (Private Placement)",
+                 "target":  "RUPSLB 6 November 2026 dibatalkan; jadwal pengganti dan pencatatan belum diumumkan",
+                 "sourceDate":  "2026-11-11",
+                 "sourceTitle":  "Pembatalan Rapat Umum Pemegang Saham Luar Biasa",
                  "note":  "Dana PP untuk penyertaan modal anak (79,2%) dan pelunasan utang; terpisah, INPS mengakuisisi 90% PT Tri Satria Indah Motor senilai Rp5,8 M (5 Okt 2026); RUPSLB 3 November 2026.",
                  "sumberTambahan":  [
                                         "Tender Wajib Indah Prakasa (INPS) Sepi Peminat, Graha Inti Hanya Serap 5.000 Saham — Kontan, 2026-07-27",
@@ -667,7 +667,7 @@
                  "target":  "RUPSLB 20 Oktober 2026",
                  "sourceDate":  "2026-09-11",
                  "sourceTitle":  "Keterbukaan Informasi terkait Aksi Korporasi - Rencana Penambahan Modal dengan HMETD - 11092026",
-                 "note":  "Pengendali baru PT JSI Sinergi Mas (51%); rencana divestasi PT Rusindo Eka Raya dan akuisisi perusahaan jasa penunjang tambang yang namanya belum disebut."
+                 "note":  "Pengendali baru PT JSI Sinergi Mas (51%); rencana divestasi PT Rusindo Eka Raya dan akuisisi perusahaan jasa penunjang tambang yang namanya belum disebut. RUPSLB 29 Okt 2026 menyetujui PMHMETD II dan nama baru PT JSI Sinergi Internasional Tbk; harga pelaksanaan Rp30, rasio 2:1, HMETD 13–20 Jan 2027 (keterbukaan 5 Nov 2026)."
              },
     "NATO":  {
                  "injectType":  "Akuisisi saham (perusahaan investasi Singapura)",
@@ -771,5 +771,27 @@
                                         "Laporan Hasil Public Expose - Tahunan — Stockbit Reports, 2026-10-12",
                                         "Lowongan Kerja PT Bara Alam Utama (Bara Coal) — Disnakerja (profil perusahaan), diakses 2026-10-15"
                                     ]
-             }
+             },
+    "ANDI": {
+        "injectType": "",
+        "injectTarget": "",
+        "nominal": "",
+        "sourceDate": "2026-10-26",
+        "sourceTitle": "Perubahan pemegang saham pengendali Perseroan",
+        "baru": "Belum diungkap; usaha saat ini tetap perkebunan & pengolahan kelapa sawit (CPO, palm kernel) di Banyuasin, Sumatera Selatan",
+        "target": "Pengumuman penawaran tender wajib oleh PT Puncak Jaya Sejahtera (jadwal belum diumumkan)",
+        "note": "Pengambilalihan 33% oleh PT Puncak Jaya Sejahtera efektif 26 Oktober 2026 di Rp30/saham; didahului cessie piutang Bank Permata ke PJS pada 21 Oktober 2026. Belum ada rencana injeksi aset atau perubahan usaha.",
+        "oldName": "PT Central Energi Pratama, PT Anugerah Perkasa Semesta",
+        "oldPct": 57.22,
+        "takeoverDate": "2026-10-26",
+        "sumberTambahan": [
+            "Perubahan pemegang saham pengendali Perseroan — Stockbit Reports, 2026-10-26",
+            "Pemberitahuan mengenai perubahan Kreditur Perseroan (cessie Bank Permata → PT Puncak Jaya Sejahtera) — Stockbit Reports, 2026-10-21",
+            "Laporan Bulanan Registrasi Pemegang Efek (KOREKSI) — Stockbit Reports, 2026-10-23",
+            "Investor Baru Ini Resmi Jadi Pengendali Saham Andira Agro (ANDI), Rogoh Rp 92,56 Miliar — Investortrust, 2026-10-27 · https://investortrust.id/market/120554/investor-baru-ini-resmi-jadi-pengendali-saham-andira-agro-andi-rogoh-rp-92-56-miliar",
+            "Puncak Jaya Sejahtera Ambil Kendali Andira Agro (ANDI) — Bloomberg Technoz, 2026-10-27 · https://www.bloombergtechnoz.com/detail-news/125854/puncak-jaya-sejahtera-ambil-kendali-andira-agro-andi",
+            "Puncak Jaya Sejahtera Resmi Jadi Pengendali Baru Andira Agro (ANDI) — BCA Sekuritas, 2026-10-27 · https://bcasekuritas.co.id/en/latest-news/news/puncak-jaya-sejahtera-resmi-jadi-pengendali-baru-andira-agro-andi",
+            "ANDI Umumkan Perubahan Kreditur dari Bank Permata ke Puncak Jaya Sejahtera — BCA Sekuritas, 2026-10-21 · https://bcasekuritas.co.id/latest-news/news/andi-umumkan-perubahan-kreditur-dari-bank-permata-ke-puncak-jaya-sejahtera"
+        ]
+    }
 }

@@ -87,3 +87,68 @@ describe('jaringan lintas emiten', () => {
     expect(idx.has('masyarakat')).toBe(false)
   })
 })
+
+describe('lensa alur saham', () => {
+  const rel = {
+    nodes: [
+      { id: 'p', row: 0, l: ['kendali', 'pengurus'], x: 1, y: 1 },
+      { id: 'd', row: 0, l: ['pengurus'] },
+      { id: 'em', row: 2 },
+      { id: 'x', row: 3 },
+    ],
+    edges: [['p', 'em', 'own', '35%'], ['p', 'em', 'role', 'Komut', ['pengurus']], ['d', 'em', 'role', 'Dirut'], ['x', 'em', 'own', '1%']],
+    transfers: [{ dari: 'a', ke: 'p' }, { dari: 'p', ke: 'b' }, { dari: 'a', ke: 'b' }],
+  }
+
+  it('memilah node per lensa, emiten selalu tampil, node tanpa lensa hanya di Semua', async () => {
+    const { lensOf } = await import('../relasiAuto.js')
+    const k = lensOf(rel, 'kendali')
+    expect(k.nodes.map(n => n.id)).toEqual(['p', 'em'])
+    // garis berlabel lensa lain disaring walau kedua ujungnya tampil
+    expect(k.edges).toEqual([['p', 'em', 'own', '35%']])
+    expect(lensOf(rel, 'pengurus').edges).toHaveLength(3)
+    expect(lensOf(rel, 'semua')).toBe(rel)
+  })
+
+  it('menata ulang subset (koordinat lama dibuang)', async () => {
+    const { lensOf } = await import('../relasiAuto.js')
+    const p = lensOf(rel, 'kendali').nodes.find(n => n.id === 'p')
+    expect(p.x).not.toBe(1)
+    expect(Number.isFinite(p.y)).toBe(true)
+  })
+
+  it('daftar lensa hanya yang dipakai data; transfer disaring per node', async () => {
+    const { lensesOf, transfersOf } = await import('../relasiAuto.js')
+    expect(lensesOf(rel).map(([k]) => k)).toEqual(['kendali', 'pengurus'])
+    expect(lensesOf({ nodes: [{ id: 'em' }] })).toEqual([])
+    expect(transfersOf(rel, 'p')).toHaveLength(2)
+    expect(transfersOf(rel, null)).toHaveLength(3)
+  })
+})
+
+describe('tata letak per lensa', () => {
+  it('baris bisa dipindah per lensa lewat lr', async () => {
+    const { lensOf } = await import('../relasiAuto.js')
+    const rel = { nodes: [{ id: 'a', row: 0, l: ['x'], lr: { x: 3 } }, { id: 'em', row: 2 }], edges: [] }
+    expect(lensOf(rel, 'x').nodes.find(n => n.id === 'a').row).toBe(3)
+  })
+
+  it('menyimpan posisi tiap lensa di objek yang sama tanpa saling menimpa', async () => {
+    const { layoutFor, mergeLayout } = await import('../relasiAuto.js')
+    let s = mergeLayout({}, 'semua', { a: { x: 1, y: 1 } })
+    s = mergeLayout(s, 'arus', { a: { x: 2, y: 2 } })
+    expect(layoutFor(s, 'semua')).toEqual({ a: { x: 1, y: 1 } })
+    expect(layoutFor(s, 'arus')).toEqual({ a: { x: 2, y: 2 } })
+    // atur ulang satu lensa tidak menghapus lensa lain
+    s = mergeLayout(s, 'arus', {})
+    expect(s).toEqual({ a: { x: 1, y: 1 } })
+  })
+})
+
+describe('posisi manual per lensa', () => {
+  it('memakai lp bila semua node lensa punya posisi', async () => {
+    const { lensOf } = await import('../relasiAuto.js')
+    const rel = { nodes: [{ id: 'a', row: 0, l: ['x'], lp: { x: [10, 20] } }, { id: 'em', row: 2, lp: { x: [30, 40] } }], edges: [] }
+    expect(lensOf(rel, 'x').nodes.map(n => [n.x, n.y])).toEqual([[10, 20], [30, 40]])
+  })
+})

@@ -45,6 +45,8 @@ export const store = reactive({
   pengendali: {},
   relasi: {},
   aset: {},        // aset-verified.json: aset injeksi, KJPP, mekanisme transaksi per emiten
+  riset: {},       // aset-riset.json: riset aset lintas sumber (jurnal, media, situs perusahaan, regulator)
+  riDoc: {},       // ri-dokumen.json: fakta penambahan modal & kewajaran aset dari dokumen asli (lampiran PDF)
   profil: {},      // profil-pengendali.json: orang di balik pengendali per emiten
   hsc: { kode: [] }, // hsc.json: saham konsentrasi kepemilikan tinggi (dikeluarkan dari IHSG)
   changelog: {},   // changelog.json: panel Pembaruan
@@ -53,6 +55,7 @@ export const store = reactive({
   // Penanda "sudah dilihat" browser ini (diset lewat tombol, bukan otomatis saat tab ditutup):
   // dasar penanda "baru" di Monitor, Berita, dan rail. Belum pernah diset = 24 jam terakhir.
   seenAt: ls.get(LS_SEEN, '') || new Date(Date.now() - 864e5).toISOString(),
+  newVersion: false,  // deploy baru sudah live, tab ini masih kode lama (lihat loadStatus)
   busy: { stockbit: false, reports: false, story: false },
   toasts: [],
   syncNote: '',
@@ -152,23 +155,30 @@ async function loadData() {
   store.updates = updates
 }
 
-async function loadStatus() {
+export async function loadStatus() {
   try { store.status = await api.get('/api/status') } catch { store.status = null }
+  // Deploy baru sudah live tetapi tab ini masih menjalankan kode lama (aplikasi satu halaman tidak memuat ulang sendiri).
+  const dep = store.status?.deploy
+  const build = typeof __BUILD__ === 'string' ? __BUILD__ : ''
+  store.newVersion = !!(build && dep?.hasil === 'live' && dep.commit && String(dep.commit).slice(0, 7) !== build)
 }
 
 export async function init() {
-  const [verified, pandangan, analisa, pengendali, relasi, aset, profil, hsc, changelog] = await Promise.all(
+  const [verified, pandangan, analisa, pengendali, relasi, aset, profil, hsc, changelog, riDoc, riset] = await Promise.all(
     ['story-verified.json', 'pandangan-analis.json', 'analisa.json', 'pengendali-verified.json', 'relasi-verified.json',
-      'aset-verified.json', 'profil-pengendali.json', 'hsc.json', 'changelog.json'].map(loadJson))
-  Object.assign(store, { verified, pandangan, analisa, pengendali, relasi, aset, profil, hsc: hsc.kode ? hsc : { kode: [] }, changelog })
+      'aset-verified.json', 'profil-pengendali.json', 'hsc.json', 'changelog.json', 'ri-dokumen.json', 'aset-riset.json'].map(loadJson))
+  Object.assign(store, { verified, pandangan, analisa, pengendali, relasi, aset, profil, hsc: hsc.kode ? hsc : { kode: [] }, changelog, riDoc, riset })
   await loadStatus()  // dulu: perlu tahu mode publik sebelum migrasi
   try { await loadData() } catch (e) { toast('Gagal memuat data dari server: ' + e.message, true) }
   try { store.features = await api.get('/api/features') } catch {}
   store.ready = true
   setInterval(loadStatus, 5 * 60e3)
   // Ambil ulang data tim saat tab kembali aktif, supaya suntingan anggota lain terlihat.
+  let terakhir = Date.now()
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') loadData().catch(() => {})
+    if (document.visibilityState !== 'visible' || Date.now() - terakhir < 3 * 60e3) return
+    terakhir = Date.now()
+    loadData().catch(() => {}); loadStatus()
   })
 }
 
